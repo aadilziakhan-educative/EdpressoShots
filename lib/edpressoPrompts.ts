@@ -75,7 +75,9 @@ ${args.competitorUrls}
    - Verifiable facts and statistics (dates, version numbers, complexity figures, benchmarks, adoption numbers).
    - Official documentation pages for the functions, APIs, or tools involved.
    - Real quotes from recognized experts (language creators, authors of well-known books, official docs), with the person's name and where it was said. Never invent or paraphrase a quote into quotation marks.
-   - Relevant history (who created it, when, why).
+   - Relevant history: who created the language, library, tool, or function, and when (one line each).
+   - What the name stands for when it is an acronym or abbreviation (for example "grepl" = "grep logical", "cURL" = "Client for URL").
+   - Hook material: a surprising, verifiable fact or statistic about the topic, and a concrete real-world scenario in which a developer runs into the exact problem this Answer solves.
    - Well-known companies or products that use the technology, when relevant.
 6. Collect related long-tail and semantically related (LSI) keywords you observed in titles, headings, autocomplete, and related searches.
 
@@ -93,6 +95,9 @@ ${args.competitorUrls}
 - Fact: <fact> — Source: <URL>
 - Quote: "<exact quote>" — <person>, <role> — Source: <URL>
 - History: <fact> — Source: <URL>
+- Name: <what the name stands for> — Source: <URL>
+- Hook fact: <surprising fact or statistic> — Source: <URL>
+- Hook scenario: <a concrete situation where a developer needs this>
 - Official docs: <page title> — <URL>
 
 ## Related keywords
@@ -149,6 +154,7 @@ export function edpressoOutlinePrompt(args: {
   userFaqs: string;
   research: string;
   verifiedLinks: string;
+  imageCount: string;
 }): string {
   return `You are the lead editor for Educative Answers. Plan the structure of a new Answer. The Answer must rank on Google, win featured snippets, and be cited by generative engines (ChatGPT, Gemini, Claude, Perplexity), while teaching the topic well.
 
@@ -177,14 +183,22 @@ ${args.verifiedLinks}
 - Cover the gaps from the research brief when they fit the scope.
 - Every heading must be meaningful on its own and should contain a keyword where natural. Numbered headings use the form "Method 1: <what it does>" or "1. <Action> using <thing>".
 - Plan where each target keyword and related keyword appears (title, first paragraph, headings, code captions, FAQs). Do not stuff keywords.
-- Choose the authority elements from the research brief: one expert quote or fun fact (only if the research found a real one with a source), facts or statistics with sources, history, official docs. Prefer these over anecdotes.
+- Hook (required): plan one opening hook that makes the reader stop. Prefer, in order: (1) a real quote from a recognized person, from the research, that is directly about this topic; (2) a surprising, sourced fact or statistic; (3) a concrete real-world scenario in which the reader hits this exact problem (for example "filtering a summer sale so no winter products appear"). Never invent a quote or attribute one loosely; never use a generic quote that would fit any article. Plan the bridge: one sentence that ties the hook to the topic.
+- Optionally plan one more quote (sectionQuote) for a section break, only if the research has a real, relevant one; it must be followed by a sentence that connects it to that section.
+- Choose the other authority elements from the research brief: facts or statistics with sources, the creator and year of the language, library, tool, or function (one clause), what the name stands for, official docs. Prefer these over anecdotes.
+- Plan one running example (concrete values or a small dataset) and reuse it across every method or step, so readers compare techniques on the same input. For data topics, prefer a real built-in or well-known dataset (for example R's mtcars or PlantGrowth, seaborn's tips) over made-up values.
+- Plan one "pause and think" question (pauseQuestion): a short open question a reader is likely to wonder about at that point (an edge case, a common confusion, or a likely follow-up search), with a 1–3 sentence answer, placed right after the section that raises it. It must not repeat an FAQ. Skip it only for error Answers under 150 planned words.
+- Images: plan exactly ${args.imageCount}. Put the "image" element on the section(s) where a picture teaches the most (a step-by-step walkthrough, an architecture, a data layout, a before/after, or how a fix changes the state). Never decorative, and at most one image per section.
 - FAQs: keep every author FAQ word for word, then add 3–5 questions from "People also ask" that the body does not already answer and that are not duplicates of an author FAQ. Aim for 8–15 FAQs in total (fewer only if the topic genuinely has fewer distinct questions).
 
 # Output
 Return ONLY a JSON object:
 {
   "primaryKeyword": "<main search phrase>",
-  "calloutQuote": { "text": "<exact quote or fun fact>", "attribution": "<person and role, or 'Fun fact'>", "sourceUrl": "<URL or empty>" } | null,
+  "hook": { "type": "quote" | "fact" | "scenario", "text": "<exact quote, fact, or scenario>", "attribution": "<person and role for a quote, otherwise empty>", "sourceUrl": "<URL or empty>", "bridge": "<sentence that ties the hook to the topic>" },
+  "sectionQuote": { "text": "<exact quote>", "attribution": "<person and role>", "sourceUrl": "<URL>", "afterHeading": "<heading of the section it opens>" } | null,
+  "runningExample": "<the concrete values or dataset reused across methods or steps>",
+  "pauseQuestion": { "question": "<open question>", "answer": "<1–3 sentence answer>", "afterHeading": "<heading of the section that raises it>" } | null,
   "keyTakeaways": ["<planned takeaway>", "..."],
   "sections": [
     {
@@ -216,6 +230,8 @@ export function edpressoWriterPrompt(args: {
   outline: string;
   research: string;
   verifiedLinks: string;
+  imageCount: string;
+  courseLinks: string;
 }): string {
   return `You are a senior technical writer for Educative Answers. Write the complete Answer described below.
 
@@ -237,6 +253,14 @@ ${args.research}
 
 # Verified links (the ONLY URLs you may use)
 ${args.verifiedLinks}
+
+# Course links (weave each one in subtly)
+${args.courseLinks}
+
+- When course links are listed above, use each one exactly once, in the body prose (a paragraph or a list item). Never in a heading, the key takeaways, a code tag, a table, an image tag, the Quiz, or the FAQ.
+- The anchor must be words the sentence needs anyway and that relate to what the course teaches: a fact, a keyword or concept name ("[dynamic programming](…) breaks a problem into overlapping subproblems"), or an example ("[building a REST API](…) with Flask").
+- The sentence must read exactly the same with the link removed. Never mention that a course, path, or resource exists, never name the course or use its title as the anchor ("learn Python", "Grokking…"), never say a topic is "covered in", "taught in", or "explained in" something, and never write calls to action: no "this course", "the following course", "to learn more", "check out", "have a look", "take a look", "enroll", "sign up", "start learning", or "see".
+- Keep anchors short (one to five words), never link a whole sentence, and never put a link inside a "#key# … #key#" keyword popup.
 
 ---
 
@@ -263,6 +287,7 @@ ${args.verifiedLinks}
 - Put anything comparable (options, methods, versions, trade-offs) in a table with a title so it can become a featured table.
 - Use numbered headings ("Method 1: …", "Step 1: …", "1. …") for multi-step or multi-method content; each heading must also say what the step or method is.
 - Place the primary keyword in the first paragraph and in at least one heading. Spread related keywords naturally through headings, body text, code captions, and FAQs. No keyword stuffing.
+- Never bold a keyword to highlight it; bold only labels and genuinely important terms.
 - Target keywords are search phrases, not strings to paste. Reorder, inflect, and capitalize them so every sentence stays grammatical: write "how to reverse a list in Python" or "the Python \`reversed()\` function", never "\`reversed()\` python for backward iteration" or "this modulenotfounderror appears". Search engines match the meaning; broken grammar costs trust. If a keyword cannot be used naturally, leave it out.
 
 # Links
@@ -270,7 +295,7 @@ ${args.verifiedLinks}
 - Turn the relevant words into the link anchor; never write "click here", "this Answer", or "see this".
 - Prefer internal Educative and how.dev links. Use official external links only as sources for facts, quotes, or documentation.
 - If the verified list is empty, write no links.
-- Close the Answer with a natural pointer to a verified Educative course or path link when one is available.
+- Link verified Educative course or path pages like any other page: on words the sentence needs anyway. Never point the reader to a course or path ("this course", "to learn more", "check out", "take a look", "enroll"), and never end the Answer with such a pointer.
 
 # Keyword popups
 - For 2–5 technical terms a newcomer may not know (jargon, acronyms, named algorithms or tools) that need only a one-line explanation, use Educative's inline keyword popup syntax exactly: #key# <term>: <one-sentence definition> #key#
@@ -281,17 +306,19 @@ ${args.verifiedLinks}
 
 # Output format (pure Markdown, no preamble, no title heading)
 
-1. If the outline has a callout quote or fun fact, start with it as a Callout widget placeholder:
+1. Open with the outline's hook. For a quote or a fact, start with a Callout widget placeholder:
 [[Callout widget]]
 "<exact quote>" — <Name>, <role>
 [[/Callout widget]]
+(for a fact: the fact itself, with no attribution line). For a scenario hook, there is no Callout: the first body paragraph after the key takeaways opens with the scenario. In every case, the first body paragraph connects the hook to the topic in one sentence (the outline's bridge), so the hook leads into the Answer instead of standing alone.
 
-2. Then the key takeaways blockquote. Each bullet must be useful on its own (not a table of contents); use bold labels where they help:
+2. Then the key takeaways blockquote. Each bullet must be useful on its own (not a table of contents) and specific to this topic; use bold labels where they help. Never restate the parameter list or say something generic such as "the best method depends on your needs":
 > **Key takeaways:**
 > - **<Label>:** <takeaway>
 > - <takeaway>
 
 3. Then the body. Use "##" for sections and "###" for subsections, in sentence case. Do not use "#".
+   Never place two elements back to back: a code tag, table, image, fenced block, or any [[… widget]]. Put at least one full sentence between any two of them that tells the reader what the next element shows (a heading alone does not count).
 
 4. Code: write the full, correct, runnable code yourself inside a code tag, in exactly this shape:
 [code]
@@ -302,8 +329,12 @@ Caption: <keyword-rich caption describing what the code does>
 \`\`\`
 [/code]
    - Give the bigger picture before the code, then explain the code after it, referring to line numbers in bold ("**Lines 4–6:** …"). Count the lines in your code carefully so every line reference is correct.
-   - Programs must compile and run as written and print visible output. Keep them short and focused.
-   - Use short inline code (\`like_this()\`) for syntax snippets; use a code tag only for a complete program.
+   - Programs must compile and run as written and print visible output. Keep them short and focused. Use the current, supported version of the language (for example Python 3 \`print()\`).
+   - Put every piece of code that can run inside a code tag, so readers can edit and run it on Educative. This includes short demonstrations: make them complete, minimal programs (imports, a main function where the language needs one, and printed output) rather than fragments. Name the key line in the sentence before the program and keep it near the top. A runnable program must really perform the operation it teaches and print the real result; never write a script that only prints or echoes the commands it describes. For tools such as Git, build a throwaway setup inside the script (for example a temporary repository plus a local bare repository as its "origin", with git user.name and user.email set) so the real commands run end to end without network access or an editor. If the operation cannot run that way, show the commands in a Terminal widget instead. A code tag must run exactly as written: no placeholders such as <sha> or <branch>, no commands that open an editor or wait for input (for example git rebase -i, vim, read), and it must create anything it uses. Use a plain fenced block only for code that cannot run on its own: a syntax or signature line, a reference list of commands, a configuration file, a command's output, or pseudo-code. Shell commands go in a Terminal widget. Use short inline code (\`like_this()\`) for names in sentences.
+   - Reuse the outline's running example in every program, so only the technique changes between methods.
+   - Every code caption is unique and says what that specific program shows; never leave a caption empty or copy it from another block.
+   - When the output is not obvious (a surprising value, a flag that changes behavior, a difference between methods), explain after the program what it prints and why each value appears; quote the key output line inline or in a short fenced block introduced by a full sentence.
+   - When methods behave differently on some input, prove it with one short program that runs both on that input and prints the difference, instead of only stating it.
 
 5. Tables: write the table yourself, in exactly this shape:
 [table]
@@ -313,8 +344,8 @@ Table title: <descriptive, keyword-rich title>
 | cell | cell |
 [/table]
 
-6. Images: only when a picture teaches something (a step-by-step walkthrough, an architecture, a data layout). Never decorative. At most two:
-[image][Description]<2–3 lines describing exactly what the illustration shows, including labels and values>[/Description][Caption]<short caption in sentence case>[/Caption][/image]
+6. Images: include exactly ${args.imageCount}, in the sections the outline marks with "image". Each must teach something (a step-by-step walkthrough, an architecture, a data layout, a before/after); never decorative. Place each image right after the paragraph it illustrates, in exactly this shape:
+[image][Description]<2–3 sentences describing exactly what the illustration shows: the specific components, their labels, the values, and the arrows or data flow between them>[/Description][Caption]<short caption in sentence case>[/Caption][/image]
 
 7. Other widgets are placeholders. Write their FULL content so an editor can paste it straight into the Educative widget. Use exactly these wrappers:
 [[Slides widget]]
@@ -326,11 +357,27 @@ Slide 2: <what the slide shows>
 <LaTeX expression>
 [[/LaTeX widget]]
 
-8. Notes and warnings use blockquotes: "> **Note:** …".
+   If the outline has a pauseQuestion, place it right after the section that raises it, using exactly this wrapper (the answer stays hidden until the reader clicks):
+[[Pause and think widget]]
+Q: <question>
+A: <answer>
+[[/Pause and think widget]]
+
+   For command-line tools, shell commands, and installation steps, add a hands-on block after the commands are explained: one sentence asking the reader to try them, then
+[[Terminal widget]]
+Setup:
+<commands that run automatically when the terminal opens to prepare a safe practice environment, one per line: non-interactive only (no editors, no -i flags, no prompts, no sudo password), no network access, for example creating a demo repository with a few commits and a local bare repository as its origin>
+Try:
+<the commands the reader types, one per line, in order; each must work in the environment Setup created and must not open an editor or wait for input>
+[[/Terminal widget]]
+   For a command-line tool, also give its commonly used options as a table (Option | Alias | Description | Example).
+
+8. Notes and warnings use blockquotes: "> **Note:** …". If the outline has a sectionQuote, open that section with it as a blockquote ("> "<exact quote>" — <Name>, <role>") followed by one sentence that connects it to the section.
+
+8b. Authority details: state the creator and year in one clause only for the exact thing they created and only when the research names them (for example "NumPy, created by Travis Oliphant in 2005, …"). Never attach a language's creator to a function, module, or feature they did not personally create, and never mention the language's creator at all unless the language itself is the subject; if the research does not name the creator of the exact subject, leave the origin out. State what the name stands for when it is an abbreviation ("\`grepl()\` stands for "grep logical"").
 
 9. End with, in this order:
-   a. A short closing section with a meaningful heading that summarizes the Answer and, when a verified course or path link exists, points to it.
-   b. If the outline says includeQuiz is true, a Quiz widget placeholder with 3 multiple-choice questions, 4 options each:
+   a. If the outline says includeQuiz is true: one sentence inviting the reader to check their understanding, then a Quiz widget placeholder with 3 multiple-choice questions, 4 options each:
 [[Quiz widget]]
 Q1. <question>
 A) <option>
@@ -342,6 +389,7 @@ Explanation: <one sentence>
 
 Q2. …
 [[/Quiz widget]]
+   b. A short closing section with a meaningful heading that summarizes the Answer. No call to action and no pointer to a course or path. It sits between the Quiz and the FAQ, so they are never back to back.
    c. The FAQ widget placeholder with every FAQ from the outline, in order, questions copied exactly (never reword an author FAQ). Each answer is 1–3 sentences, starts with the direct answer, may include a short fenced code snippet, and may link one related verified page:
 [[FAQ widget]]
 Q: <question exactly as planned>
@@ -368,6 +416,7 @@ export function edpressoReviewerPrompt(args: {
   typeStructure: string;
   keywords: string;
   verifiedLinks: string;
+  courseLinks: string;
   draft: string;
 }): string {
   return `You are the final reviewer for Educative Answers. Audit the draft below against the checklist, fix every problem, and return the corrected Answer.
@@ -377,7 +426,7 @@ export function edpressoReviewerPrompt(args: {
 - Answer type: ${args.answerTypeLabel}
 - Body word budget: ${args.wordBudget}
 - Current body word count (measured by code; excludes code, tables, images, widget placeholders, and FAQ answers): ${args.currentWordCount}
-- The Quiz and FAQ widgets have been removed from the draft and are re-attached after your output. Do not write a Quiz or FAQ widget.
+- The Quiz and FAQ widgets have been removed from the draft and are re-attached after your output, at the lines that read EDPWIDGET0TOKEN, EDPWIDGET1TOKEN, and so on. Keep each of those lines exactly where it is, and do not write a Quiz or FAQ widget.
 - Target keywords (search queries people type; cover their meaning, use the exact wording only where it reads as natural English, and never put a keyword in backticks unless it is code): ${args.keywords}
 
 # Required structure for this Answer type
@@ -385,6 +434,9 @@ ${args.typeStructure}
 
 # Verified links (the only URLs allowed)
 ${args.verifiedLinks}
+
+# Course links (each must appear exactly once, subtly)
+${args.courseLinks}
 
 # Checklist
 1. Length: if the body is over budget, tighten it (cut filler, merge repeated points, shorten examples) until it fits. Never pad a draft that is under budget.
@@ -395,12 +447,18 @@ ${args.verifiedLinks}
 6. Primary keyword in the first paragraph and at least one heading; related keywords appear naturally; no stuffing.
 7. No vague claims, hyperbole, flowery language, clichés, anecdotes, or first-person stories. Tone is authoritative and positive.
 8. Every technical claim is correct. Code compiles, runs, prints output, and every "**Line N:**" reference points to the right line. Fix the code or the references if they disagree.
-9. Every URL appears in the verified links list. Remove any other link (keep its anchor text as plain text). Anchors are descriptive words, never "click here".
-9b. Target keywords appear in natural, grammatical wording with correct capitalization. Rewrite any phrase where a keyword was pasted verbatim and reads wrong (for example "\`reversed()\` python for…" → "the Python \`reversed()\` function for…").
+8b. Course links: each listed course link appears exactly once, in body prose, anchored on a fact, keyword, concept, or example the sentence needs anyway. The sentence reads the same with the link removed. Remove any mention of a course or resource, any anchor that names the course, any "covered in"/"taught in" wording, and any call to action around it ("this course", "to learn more", "check out", "have a look", "enroll"). Never drop a course link; move it to a better phrase instead.
+9. Every URL appears in the verified links list or the course links list. No sentence points the reader to a course or path ("this course", "to learn more", "check out", "take a look", "enroll"), including in the closing section; rewrite such a sentence so its link sits on words it needs anyway, or remove the sentence. Remove any other link (keep its anchor text as plain text). Anchors are descriptive words, never "click here".
+9b. No keyword is bolded just to highlight it. A creator or year appears only for the exact subject (never the language's creator in an Answer about a function or feature). Search the draft for each target keyword written word for word; wherever that exact wording is not grammatical English in its sentence, rewrite the phrase (for example "why re.sub python usage matters" → "why Python's \`re.sub()\` matters"). Target keywords appear in natural, grammatical wording with correct capitalization. Rewrite any phrase where a keyword was pasted verbatim and reads wrong (for example "\`reversed()\` python for…" → "the Python \`reversed()\` function for…").
 10. Keyword popups use the exact syntax "#key# term: definition #key#", appear 2–5 times, and only explain jargon. Read each sentence with the popup replaced by its term alone; it must still be correct, with sentence punctuation after the closing #key#. Remove popups that merely repeat a target keyword or wrap a command, and fix keywords inserted with wrong casing or broken grammar.
-11. Widget syntax is intact: [code]…[/code] with Language, Caption, and a fenced block; [table]…[/table] with "Table title:"; [image][Description]…[/Description][Caption]…[/Caption][/image]; and [[X widget]]…[[/X widget]] placeholders.
-12. The body ends with the closing section (the Quiz and FAQ widgets are attached after it automatically).
+11. Keep every [image] tag the draft has; never remove or merge images. Widget syntax is intact: [code]…[/code] with Language, Caption, and a fenced block; [table]…[/table] with "Table title:"; [image][Description]…[/Description][Caption]…[/Caption][/image]; and [[X widget]]…[[/X widget]] placeholders.
+12. The Quiz token (if any) comes after a sentence inviting the reader to check their understanding and before the closing section; the FAQ token comes last.
 13. Lists are ordered logically (most important first). Paragraphs open with their key point. No repeated words in consecutive sentences.
+14. The Answer opens with a hook (a Callout quote or fact, or a scenario in the first paragraph) and the first body paragraph ties it to the topic. A quote must be relevant to this topic and attributed to a named person; replace a generic or unattributed quote with a sourced fact or a concrete scenario.
+15. Key takeaways are specific to this topic; none restates the parameter list or says something generic.
+16. Every method or step reuses the same running example; any code that can run is a complete program in a code tag (only syntax lines, configuration, output, and pseudo-code stay as plain fenced blocks; shell commands go in a Terminal widget); every code caption is unique and describes its own program; non-obvious output is explained.
+16b. No two elements (code tag, table, image, fenced block, [[… widget]], or EDPWIDGET token) are back to back: at least one full sentence introducing the next element sits between them.
+17. Keep every [[Pause and think widget]], [[Terminal widget]], and [[Callout widget]] intact. A Terminal widget has a "Setup:" part (non-interactive commands that prepare the environment) and a "Try:" part (commands that work in that environment and never open an editor or wait for input). No program only echoes or prints the commands it describes; replace such a program with one that really runs them, or with the Terminal widget.
 
 # Draft
 ${args.draft}
@@ -468,4 +526,79 @@ ${args.answer}
 
 Return ONLY a JSON object:
 { "metaTitle": "<text>", "metaDescription": "<text>", "slug": "<slug>" }`;
+}
+
+// ---------------------------------------------------------------------------
+// 7) Image plan — fills in images the writer or reviewer left out
+// ---------------------------------------------------------------------------
+export function edpressoImagePlanPrompt(args: {
+  title: string;
+  missingCount: string;
+  headings: string;
+  answer: string;
+}): string {
+  return `You are planning illustrations for an Educative Answer that has fewer images than required.
+
+# Inputs
+- Answer title: ${args.title}
+- Images to add: ${args.missingCount}
+- Section headings (pick from these exactly; sections that already have an image are excluded): ${args.headings}
+
+# Answer
+${args.answer}
+
+# Rules
+- Each image must teach something the prose explains: a step-by-step walkthrough, an architecture, a data layout, a before/after, or how a fix changes the state. Never decorative.
+- Pick a different section for each image, where a picture helps the most.
+- description: 2–3 sentences describing exactly what the illustration shows: the specific components, their labels, the values from the Answer, and the arrows or data flow between them.
+- caption: a short caption in sentence case.
+
+Return ONLY a JSON object:
+{ "images": [ { "heading": "<exact heading text from the list>", "description": "<text>", "caption": "<text>" } ] }`;
+}
+
+// ---------------------------------------------------------------------------
+// 8) Course links — places a course link the Answer is missing on words it already has
+// ---------------------------------------------------------------------------
+export function edpressoCourseLinkPrompt(args: {
+  title: string;
+  tasks: string;
+  sentences: string;
+}): string {
+  return `You are adding course links to an Educative Answer titled "${args.title}". Each link must read as an ordinary anchor on words the sentence already has, never as an advert.
+
+# Course links to place
+${args.tasks}
+
+# Candidate sentences (from the Answer body)
+${args.sentences}
+
+# Rules
+- For each course link, pick the candidate sentence whose topic relates most closely to what the course teaches. Use a different sentence for each course.
+- anchor: one to five consecutive words copied exactly from that sentence: a fact, a keyword, a concept name, or an example. Never words inside backticks, never the course's name, and never words starting with "learn", "master", or "explore".
+
+Return ONLY a JSON object:
+{ "links": [ { "url": "<course URL>", "sentence": <candidate number>, "anchor": "<exact words from that sentence>" } ] }`;
+}
+
+
+// ---------------------------------------------------------------------------
+// 9) Transitions — one sentence between two elements that sit back to back
+// ---------------------------------------------------------------------------
+export function edpressoTransitionsPrompt(args: {
+  title: string;
+  gaps: string;
+}): string {
+  return `In the Educative Answer titled "${args.title}", the elements below sit back to back with no text between them. Write one sentence for each gap that leads the reader from the first element into the second.
+
+# Gaps
+${args.gaps}
+
+# Rules
+- One sentence of 6–25 words per gap, in the Answer's voice ("we", present tense), that says what the next element shows or does (for example "Running the program below shows how the count parameter limits replacements.").
+- Specific to the content of the next element; never generic filler such as "Let's look at the following."
+- No links, no headings, no lists, and no mention of courses or resources.
+
+Return ONLY a JSON object:
+{ "sentences": [ { "gap": <gap number>, "text": "<sentence>" } ] }`;
 }

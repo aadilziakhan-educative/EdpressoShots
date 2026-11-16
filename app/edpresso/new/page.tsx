@@ -16,6 +16,8 @@ const ANSWER_TYPE_OPTIONS = [
 
 const LANGUAGES = ['Python', 'Java', 'JavaScript', 'TypeScript', 'C++', 'C#', 'C', 'Go', 'Rust', 'Ruby', 'PHP', 'Kotlin', 'Swift', 'SQL', 'Bash', 'R', 'Scala', 'Dart'];
 const MAX_COMPETITOR_URLS = 3;
+// Mirrors MAX_COURSE_LINKS in lib/edpressoPipeline.ts.
+const MAX_COURSE_LINKS = 2;
 
 function slugify(title: string): string {
   return title
@@ -37,16 +39,20 @@ export default function NewEdpressoPage() {
   const [language, setLanguage] = useState('');
   const [answerType, setAnswerType] = useState('auto');
   const [competitorUrls, setCompetitorUrls] = useState('');
+  const [courseLinks, setCourseLinks] = useState<string[]>(Array(MAX_COURSE_LINKS).fill(''));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
   const competitorList = competitorUrls.split('\n').map((u) => u.trim()).filter(Boolean);
   const badCompetitor = competitorList.find((u) => !/^https?:\/\/\S+$/i.test(u));
+  const courseList = courseLinks.map((u) => u.trim()).filter(Boolean);
+  const badCourse = courseList.find((u) => !/^https?:\/\/(www\.)?educative\.io\/\S+$/i.test(u));
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (competitorList.length > MAX_COMPETITOR_URLS) { setErr(`Add at most ${MAX_COMPETITOR_URLS} competitor URLs.`); return; }
     if (badCompetitor) { setErr(`Competitor URL must start with http:// or https:// — "${badCompetitor}"`); return; }
+    if (badCourse) { setErr(`Course link must be an educative.io URL — "${badCourse}"`); return; }
     setBusy(true);
     setErr('');
     try {
@@ -60,6 +66,7 @@ export default function NewEdpressoPage() {
           language: language.trim(),
           answerType,
           competitorUrls: competitorList.join('\n'),
+          courseLinks: courseList.join('\n'),
         }),
       });
       if (!res.ok || !res.body) { setErr('Request failed'); setBusy(false); return; }
@@ -169,6 +176,24 @@ export default function NewEdpressoPage() {
             value={competitorUrls}
             onChange={(e) => setCompetitorUrls(e.target.value)}
           />
+        </Field>
+
+        <Field
+          label={`Course links (optional, up to ${MAX_COURSE_LINKS})`}
+          hint="Educative course URLs. Each is linked once from a fact, keyword, or example in the Answer, never with wording like “this course” or “to learn more”."
+        >
+          <div className="grid gap-2">
+            {courseLinks.map((link, i) => (
+              <input
+                key={i}
+                className="input font-mono text-xs"
+                type="url"
+                placeholder="https://www.educative.io/courses/…"
+                value={link}
+                onChange={(e) => setCourseLinks((list) => list.map((l, j) => (j === i ? e.target.value : l)))}
+              />
+            ))}
+          </div>
         </Field>
 
         <div className="flex items-center gap-3 pt-1">

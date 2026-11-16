@@ -18,7 +18,7 @@ const StageOutputs = dynamic(
 
 const STAGE_ORDER = [
   'classify', 'competitor-research', 'link-discovery', 'link-verify', 'outline', 'writer',
-  'reviewer', 'word-count', 'link-guard', 'seo-meta', 'images', 'assemble',
+  'reviewer', 'word-count', 'link-guard', 'course-links', 'seo-meta', 'image-plan', 'images', 'transitions', 'assemble', 'educative',
 ];
 
 type View = 'preview' | 'copy' | 'links' | 'edit' | 'debug';
@@ -63,6 +63,7 @@ export default function EdpressoRunPage() {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState('');
   const [origin, setOrigin] = useState('');
+  const [pushing, setPushing] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -153,6 +154,22 @@ export default function EdpressoRunPage() {
     }
   }
 
+  async function sendToEducative() {
+    setPushing(true);
+    try {
+      const res = await fetch(`/api/edpresso/${id}/educative`, { method: 'POST' });
+      const json = await res.json();
+      setFinal((f: any) => {
+        const { educativeError: _old, ...rest } = f?.edpresso || {};
+        return { ...f, edpresso: res.ok ? { ...rest, educative: json.educative } : { ...rest, educative: rest.educative, educativeError: json?.error || 'Failed to send to Educative' } };
+      });
+    } catch (e: any) {
+      setFinal((f: any) => ({ ...f, edpresso: { ...f?.edpresso, educativeError: e?.message || String(e) } }));
+    } finally {
+      setPushing(false);
+    }
+  }
+
   function download(content: string, name: string) {
     const blob = new Blob([content], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -234,6 +251,12 @@ export default function EdpressoRunPage() {
               {tabBtn('copy', 'Copy-ready Markdown')}
               {tabBtn('links', 'Links')}
               <button className="btn-secondary" onClick={startEdit}>Edit</button>
+              {ed.educative?.editorUrl && (
+                <a className="btn-secondary" href={ed.educative.editorUrl} target="_blank" rel="noreferrer">Open in Educative</a>
+              )}
+              <button className="btn-secondary" disabled={pushing} onClick={sendToEducative}>
+                {pushing ? 'Sending…' : ed.educative ? 'Update on Educative' : 'Send to Educative'}
+              </button>
             </>
           )}
           {hasDebug && view !== 'edit' && (
@@ -254,6 +277,18 @@ export default function EdpressoRunPage() {
       </div>
 
       {err && <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm">{err}</div>}
+      {isDone && ed.educativeError && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm break-words">
+          Could not create the Answer on Educative: {ed.educativeError}
+        </div>
+      )}
+      {isDone && ed.educative && !ed.educativeError && (
+        <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 p-4 text-sm">
+          Draft Answer created on Educative for review (not published).{' '}
+          <a className="underline" href={ed.educative.editorUrl} target="_blank" rel="noreferrer">Open it in the editor</a>.
+          {ed.educative.imageFailures > 0 && ` ${ed.educative.imageFailures} image(s) could not be uploaded and appear as placeholders.`}
+        </div>
+      )}
       {isDone && missingFaqs.length > 0 && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 p-4 text-sm">
           These FAQs you asked for are not in the FAQ widget word for word. Add them with Edit:
@@ -366,6 +401,7 @@ export default function EdpressoRunPage() {
 }
 
 function LinksReport({ ed }: { ed: any }) {
+  const courseLinks: any[] = ed.courseLinks || [];
   const verified: any[] = ed.verifiedLinks || [];
   const rejected: any[] = ed.rejectedLinks || [];
   const removed: string[] = ed.removedLinks || [];
@@ -375,6 +411,24 @@ function LinksReport({ ed }: { ed: any }) {
         Every link candidate was requested over HTTP; only pages that loaded were offered to the writer, and any other URL in the draft was
         replaced with plain text.
       </p>
+      {courseLinks.length > 0 && (
+        <section className="space-y-2">
+          <h3 className="text-sm font-semibold">Course links ({courseLinks.filter((l) => l.status === 'linked').length} of {courseLinks.length} linked)</h3>
+          <ul className="space-y-2">
+            {courseLinks.map((l) => (
+              <li key={l.url} className="space-y-0.5">
+                <div className="flex gap-2 items-baseline">
+                  <span className={`pill py-0 text-[10px] ${l.status === 'linked' ? 'pill-success' : 'pill-error'}`}>{l.status === 'linked' ? 'linked' : 'not placed'}</span>
+                  <a className="underline break-all" href={l.url} target="_blank" rel="noreferrer">{l.url}</a>
+                </div>
+                {l.status === 'linked'
+                  ? <p className="text-[var(--text-dim)] ml-1">Anchor “{l.anchor}” in: <span className="text-[var(--text-faint)]">{l.sentence}</span></p>
+                  : <p className="text-[var(--text-faint)] ml-1">No natural phrase was found. Add the link with Edit if one fits.</p>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">Verified ({verified.length})</h3>
         {verified.length === 0 ? <p className="text-[var(--text-faint)]">None.</p> : (

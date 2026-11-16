@@ -25,6 +25,7 @@ export interface SavedBlog {
     language?: string;
     answerType?: string;
     competitorUrls?: string;
+    courseLinks?: string;
   };
   // pipeline outputs
   finalTitle?: string;

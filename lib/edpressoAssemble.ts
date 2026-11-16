@@ -81,6 +81,11 @@ function segmentHtml(seg: EdpressoSegment, order: number): string {
     }
     return placeholderHtml('Image', `**Image not generated.** ${seg.description}${seg.caption ? `\n\nCaption: ${seg.caption}` : ''}`);
   }
+  if (seg.widget === 'Callout') return `<aside class="edp-callout">${mdToHtml(seg.body, true)}</aside>`;
+  if (seg.widget === 'Terminal') {
+    const lines = seg.body.replace(/^\s*```[\w-]*\s*$/gm, '').split('\n').filter((l) => l.trim());
+    return `<pre class="edp-terminal">${lines.map((l) => (/^\s*(Setup|Try):\s*$/i.test(l) ? `# ${escapeHtml(l.trim())}` : `$ ${escapeHtml(l.trim().replace(/^\$\s?/, ''))}`)).join('\n')}</pre>`;
+  }
   return placeholderHtml(seg.widget, seg.body);
 }
 

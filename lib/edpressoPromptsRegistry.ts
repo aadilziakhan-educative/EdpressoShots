@@ -9,3 +9,6 @@ export const edpressoWriterPrompt             = registerPrompt('edpresso-writer'
 export const edpressoReviewerPrompt           = registerPrompt('edpresso-reviewer',            P.edpressoReviewerPrompt,           'edpresso');
 export const edpressoWidgetReviewPrompt       = registerPrompt('edpresso-widget-review',       P.edpressoWidgetReviewPrompt,       'edpresso');
 export const edpressoSeoMetaPrompt            = registerPrompt('edpresso-seo-meta',            P.edpressoSeoMetaPrompt,            'edpresso');
+export const edpressoImagePlanPrompt          = registerPrompt('edpresso-image-plan',          P.edpressoImagePlanPrompt,          'edpresso');
+export const edpressoCourseLinkPrompt         = registerPrompt('edpresso-course-link',         P.edpressoCourseLinkPrompt,         'edpresso');
+export const edpressoTransitionsPrompt        = registerPrompt('edpresso-transitions',         P.edpressoTransitionsPrompt,        'edpresso');
