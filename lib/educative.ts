@@ -11,6 +11,7 @@
 //   [[Pause and think widget]] → StructuredQuiz widget (open question, answer revealed on click)
 //   [[Callout widget]]    → Callout (a <callout> element in a SlateHTML block)
 //   [[Terminal widget]]   → the "Try:" commands as a list, then a Terminal widget whose start script runs "Setup:"
+//   [[LaTeX widget]]      → block Latex widget (a formula rendered as math)
 //   other [[X widget]] …  → MarkdownEditor carrying the placeholder, for the reviewer to convert
 //
 // Auth is the `flask-auth` session cookie of an Educative account that can author Answers.
@@ -98,6 +99,63 @@ const RUN_LANGUAGE: Record<string, string> = {
   rust: 'rust-1-57-0', kotlin: 'kotlin', swift: 'swift', scala: 'scala', r: 'r', perl: 'perl',
   dart: 'dart', haskell: 'haskell', elixir: 'elixir', bash: 'shell', sql: 'sql-8', postgresql: 'postgresql',
 };
+
+// ---------- Running code ----------
+
+export interface CodeRunResult {
+  ran: boolean;          // false when the language can't run on Educative (or the shell script can't run as written)
+  ok: boolean;           // exit status 0
+  stdout: string;
+  stderr: string;
+  time: string;
+  reason?: string;
+}
+
+// Runs a program the way the Code widget's Run button does (POST /api/code/execute), so the output is
+// what readers will see. Needs EDUCATIVE_FLASK_AUTH.
+export async function runCode(language: string, code: string): Promise<CodeRunResult> {
+  const base = LANG_MAP[language] || language;
+  const runLanguage = base === 'bash' && isUnrunnableShell(code) ? undefined : RUN_LANGUAGE[base];
+  if (!runLanguage) return { ran: false, ok: false, stdout: '', stderr: '', time: '', reason: `${language || 'this language'} is not runnable on Educative` };
+  const form = new URLSearchParams({
+    language: runLanguage,
+    entry_filename: DEFAULT_ENTRY[base] || 'main.txt',
+    source_code: code,
+    stdin: '',
+    comp_type: 'Code',
+  });
+  const res = await educativeFetch('/api/code/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString(),
+  });
+  const cap = (s: any) => String(s || '').slice(0, 4000);
+  return {
+    ran: true,
+    ok: res?.status === 0,
+    stdout: cap(res?.stdout),
+    stderr: cap(res?.stderr),
+    time: String(res?.time || ''),
+    reason: String(res?.reason || ''),
+  };
+}
+
+// The editor's block LaTeX widget (typing $$…$$ in the editor creates one with content.text).
+function makeLatexBlock(latex: string): any | null {
+  const text = latex.trim().replace(/^\$\$|\$\$$/g, '').trim();
+  if (!text) return null;
+  return {
+    type: 'Latex',
+    mode: 'edit',
+    content: { text, comp_id: uid('latex') },
+    hash: 0,
+    iteration: 0,
+    children: [{ text: '' }],
+    status: 'normal',
+    contentID: uid('latex'),
+    saveVersion: 1,
+  };
+}
 
 function titleCaseLang(l: string): string {
   const special: Record<string, string> = { 'c++': 'C++', 'c#': 'C#', javascript: 'JavaScript', typescript: 'TypeScript', php: 'PHP', sql: 'SQL' };
@@ -498,6 +556,8 @@ export async function buildAnswerBlocks(markdown: string, shotId: string): Promi
       blocks.push(makeCalloutBlock(seg.body));
     } else if (seg.widget === 'Terminal' && makeTerminalBlocks(seg.body).length) {
       blocks.push(...makeTerminalBlocks(seg.body));
+    } else if (/^latex$/i.test(seg.widget) && makeLatexBlock(seg.body)) {
+      blocks.push(makeLatexBlock(seg.body));
     } else {
       // Keep the placeholder's line structure ("Q1.", "A)", "Slide 1:" …): one paragraph per line
       // outside code fences, so Markdown does not merge consecutive lines.

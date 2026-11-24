@@ -17,8 +17,8 @@ const StageOutputs = dynamic(
 );
 
 const STAGE_ORDER = [
-  'classify', 'competitor-research', 'link-discovery', 'link-verify', 'outline', 'writer',
-  'reviewer', 'word-count', 'link-guard', 'course-links', 'seo-meta', 'image-plan', 'images', 'transitions', 'assemble', 'educative',
+  'classify', 'competitor-research', 'link-discovery', 'faq-check', 'link-verify', 'outline', 'quote-check', 'writer',
+  'reviewer', 'word-count', 'code-check', 'keyword-cap', 'word-trim', 'link-guard', 'course-links', 'seo-meta', 'image-plan', 'images', 'transitions', 'assemble', 'educative',
 ];
 
 type View = 'preview' | 'copy' | 'links' | 'edit' | 'debug';
@@ -192,8 +192,9 @@ export default function EdpressoRunPage() {
       (markdown.match(/\[\[FAQ widget\]\]([\s\S]*?)\[\[\/FAQ widget\]\]/)?.[1] || '')
         .split('\n').filter((l) => /^\s*Q:/.test(l)).map((l) => norm(l.replace(/^\s*Q:\s*/, ''))),
     );
-    return ((ed.userFaqs || []) as string[]).filter((q) => !present.has(norm(q)));
-  }, [markdown, ed.userFaqs]);
+    return ((ed.authorFaqs || ed.userFaqs || []) as string[]).filter((q) => !present.has(norm(q)));
+  }, [markdown, ed.authorFaqs, ed.userFaqs]);
+  const failingPrograms: any[] = (ed.codeCheck?.final || []).filter((p: any) => p.ran && !p.ok);
   const budget: number = ed.wordBudget || 0;
   const overBudget = budget > 0 && wordCount > budget;
   const liveText = typeof outputs['writer'] === 'string' ? outputs['writer'] : null;
@@ -298,6 +299,24 @@ export default function EdpressoRunPage() {
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 p-4 text-sm">
           These FAQs you asked for are not in the FAQ widget word for word. Add them with Edit:
           <ul className="list-disc ml-5 mt-1">{missingFaqs.map((q) => <li key={q}>{q}</li>)}</ul>
+        </div>
+      )}
+      {isDone && (ed.droppedAuthorFaqs || []).length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 p-4 text-sm">
+          These FAQs you gave were left out because they drift from this Answer's exact question (they target other searches). Add any back with Edit if you want them:
+          <ul className="list-disc ml-5 mt-1">
+            {ed.droppedAuthorFaqs.map((f: any) => <li key={f.question}>{f.question}{f.reason ? ` — ${f.reason}` : ''}</li>)}
+          </ul>
+        </div>
+      )}
+      {isDone && failingPrograms.length > 0 && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm break-words">
+          {failingPrograms.length} program(s) still fail when run on Educative. Fix them before publishing:
+          <ul className="list-disc ml-5 mt-1">
+            {failingPrograms.map((p: any) => (
+              <li key={p.program}>Program {p.program}{p.caption ? ` (${p.caption})` : ''}: {(p.stderr || p.reason || 'failed').slice(0, 300)}</li>
+            ))}
+          </ul>
         </div>
       )}
 
