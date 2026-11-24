@@ -19,6 +19,9 @@ const MAX_COMPETITOR_URLS = 3;
 // Mirrors MAX_COURSE_LINKS in lib/edpressoPipeline.ts.
 const MAX_COURSE_LINKS = 2;
 
+// Mirrors parseAnswerId in lib/educative.ts.
+const ANSWER_EDITOR_LINK_RE = /^(https?:\/\/(www\.)?educative\.io\/(editor\/)?answereditor\/\d{6,}\/?|\d{6,})$/i;
+
 function slugify(title: string): string {
   return title
     .toLowerCase()
@@ -40,6 +43,7 @@ export default function NewEdpressoPage() {
   const [answerType, setAnswerType] = useState('auto');
   const [competitorUrls, setCompetitorUrls] = useState('');
   const [courseLinks, setCourseLinks] = useState<string[]>(Array(MAX_COURSE_LINKS).fill(''));
+  const [existingAnswerUrl, setExistingAnswerUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
@@ -53,6 +57,11 @@ export default function NewEdpressoPage() {
     if (competitorList.length > MAX_COMPETITOR_URLS) { setErr(`Add at most ${MAX_COMPETITOR_URLS} competitor URLs.`); return; }
     if (badCompetitor) { setErr(`Competitor URL must start with http:// or https:// — "${badCompetitor}"`); return; }
     if (badCourse) { setErr(`Course link must be an educative.io URL — "${badCourse}"`); return; }
+    const existing = existingAnswerUrl.trim();
+    if (existing && !ANSWER_EDITOR_LINK_RE.test(existing)) {
+      setErr(`Existing Answer must be an editor link like https://www.educative.io/editor/answereditor/6241014612361216 — "${existing}"`);
+      return;
+    }
     setBusy(true);
     setErr('');
     try {
@@ -67,9 +76,15 @@ export default function NewEdpressoPage() {
           answerType,
           competitorUrls: competitorList.join('\n'),
           courseLinks: courseList.join('\n'),
+          existingAnswerUrl: existing,
         }),
       });
-      if (!res.ok || !res.body) { setErr('Request failed'); setBusy(false); return; }
+      if (!res.ok || !res.body) {
+        const json = await res.json().catch(() => null);
+        setErr(json?.error || 'Request failed');
+        setBusy(false);
+        return;
+      }
 
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -196,6 +211,18 @@ export default function NewEdpressoPage() {
           </div>
         </Field>
 
+        <Field
+          label="Replace an existing Answer (optional)"
+          hint="Paste the Answer's editor link to overwrite its content, title, and tags with this Shot instead of creating a new Answer. Its published URL is kept; the change goes live when a reviewer publishes it."
+        >
+          <input
+            className="input font-mono text-xs"
+            placeholder="https://www.educative.io/editor/answereditor/6241014612361216"
+            value={existingAnswerUrl}
+            onChange={(e) => setExistingAnswerUrl(e.target.value)}
+          />
+        </Field>
+
         <div className="flex items-center gap-3 pt-1">
           <button disabled={busy} className="btn-primary">
             {busy ? (
@@ -205,7 +232,7 @@ export default function NewEdpressoPage() {
               </>
             ) : (
               <>
-                Generate Edpresso Shot
+                {existingAnswerUrl.trim() ? 'Generate and replace Answer' : 'Generate Edpresso Shot'}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path d="M5 12h14M13 5l7 7-7 7" />
                 </svg>

@@ -41,6 +41,10 @@ const ENDPOINTS = {
 // The editor's default for an Answer without a custom Docker container.
 const EMPTY_DOCKER = { jobs: [], version: 3, loaded: true, container: { imageName: '', buildStatusUrl: '', buildLogUrl: '', file: {} }, envs: [] };
 
+export function answerEditorUrl(shotId: string): string {
+  return ENDPOINTS.editorUrl(shotId);
+}
+
 export function isEducativeConfigured(): boolean {
   return !!process.env.EDUCATIVE_FLASK_AUTH?.trim();
 }
@@ -513,28 +517,87 @@ export interface EducativeDraft {
   editorUrl: string;
   pushedAt: string;
   imageFailures: number;
+  replacedExisting?: boolean;
+}
+
+// Answer ID from an editor link, or a bare ID. Accepts
+//   https://www.educative.io/editor/answereditor/6241014612361216
+//   https://www.educative.io/answereditor/6241014612361216
+// Returns null for anything else (published /answers/<slug> pages carry no ID).
+export function parseAnswerId(link: string | undefined | null): string | null {
+  const s = (link || '').trim();
+  if (!s) return null;
+  if (/^\d{6,}$/.test(s)) return s;
+  try {
+    const u = new URL(s);
+    if (!/(^|\.)educative\.io$/i.test(u.hostname)) return null;
+    const m = u.pathname.match(/\/answereditor\/(\d{6,})\/?$/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ExistingAnswer {
+  shotId: string;
+  title: string;
+  tags: string;
+  url: string;
+  canonical_url: string;
+  programming_tags: string;
+  topic_tags: string;
+  docker: any;
+}
+
+// Loads an Answer's settings (same call the editor makes on open). Throws when the account in
+// EDUCATIVE_FLASK_AUTH cannot open it.
+export async function getAnswer(shotId: string): Promise<ExistingAnswer> {
+  let shot: any;
+  try {
+    shot = await educativeFetch(ENDPOINTS.save(shotId), { method: 'GET' });
+  } catch (e: any) {
+    throw new Error(`Could not open Answer ${shotId} on Educative. Check the link and that the EDUCATIVE_FLASK_AUTH account can edit it. (${e?.message || e})`);
+  }
+  if (!shot || typeof shot !== 'object') throw new Error(`Answer ${shotId} was not found on Educative`);
+  return {
+    shotId,
+    title: shot.title || '',
+    tags: shot.tags || '',
+    url: shot.url || '',
+    canonical_url: shot.canonical_url || '',
+    programming_tags: shot.programming_tags || '',
+    topic_tags: shot.topic_tags || '',
+    docker: shot.docker && typeof shot.docker === 'object' ? shot.docker : EMPTY_DOCKER,
+  };
 }
 
 // Creates the Answer on Educative (or overwrites the same draft when shotId is given) and saves its
 // content. It is never published here; a reviewer publishes it from the Educative editor.
+// With replaceExisting, shotId is an Answer that existed before this tool: its whole content, title
+// and tags are replaced, while its published URL, canonical URL, topic and programming tags, and
+// Docker setup are kept so the live link doesn't change when the reviewer republishes.
 export async function pushAnswerDraft(args: {
   title: string;
   markdown: string;
   tags?: string[];
   slug?: string;
   shotId?: string;
+  replaceExisting?: boolean;
 }): Promise<EducativeDraft> {
+  if (args.replaceExisting && !args.shotId) throw new Error('replaceExisting needs the existing Answer ID');
+  const existing = args.replaceExisting ? await getAnswer(args.shotId!) : null;
   const shotId = args.shotId || await createShot();
   const { blocks, imageIds, imageFailures } = await buildAnswerBlocks(args.markdown, shotId);
-  // Same body the editor's Save button sends. url stays empty: the editor only sets it on publish.
+  // Same body the editor's Save button sends. For a new Answer url stays empty: the editor only
+  // sets it on publish.
   const shot = {
     title: args.title,
-    tags: (args.tags || []).join(','),
-    programming_tags: '',
-    topic_tags: '',
-    url: '',
-    docker: EMPTY_DOCKER,
-    canonical_url: '',
+    tags: (args.tags || []).join(',') || existing?.tags || '',
+    programming_tags: existing?.programming_tags || '',
+    topic_tags: existing?.topic_tags || '',
+    url: existing?.url || '',
+    docker: existing?.docker || EMPTY_DOCKER,
+    canonical_url: existing?.canonical_url || '',
   };
   const body = {
     ...shot,
@@ -547,5 +610,11 @@ export async function pushAnswerDraft(args: {
     headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'deflate', 'X-ETag': 'overwrite' },
     body: zlib.deflateSync(JSON.stringify(body), { level: 9 }),
   });
-  return { shotId, editorUrl: ENDPOINTS.editorUrl(shotId), pushedAt: new Date().toISOString(), imageFailures };
+  return {
+    shotId,
+    editorUrl: ENDPOINTS.editorUrl(shotId),
+    pushedAt: new Date().toISOString(),
+    imageFailures,
+    ...(args.replaceExisting ? { replacedExisting: true } : {}),
+  };
 }

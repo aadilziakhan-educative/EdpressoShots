@@ -345,7 +345,8 @@ Table title: <descriptive, keyword-rich title>
 [/table]
 
 6. Images: include exactly ${args.imageCount}, in the sections the outline marks with "image". Each must teach something (a step-by-step walkthrough, an architecture, a data layout, a before/after); never decorative. Place each image right after the paragraph it illustrates, in exactly this shape:
-[image][Description]<2–3 sentences describing exactly what the illustration shows: the specific components, their labels, the values, and the arrows or data flow between them>[/Description][Caption]<short caption in sentence case>[/Caption][/image]
+[image][Description]<2–3 sentences describing exactly what the illustration shows: the specific components, their labels, the values, and the arrows or data flow between them>[/Description][Caption]<alt text: 8–20 words, at most 125 characters, in sentence case>[/Caption][/image]
+   The caption is also the image's alt text on Educative, so it must say what the image shows for a reader who can't see it: the subject and the key relationship or result (e.g., "Pandas groupby splitting rows by city, summing sales per group, and combining the results"). Don't start with "Image of", "Diagram showing" or "Figure"; never write a generic caption like "Diagram" or "Example"; use the primary keyword when it fits naturally; make each caption unique.
 
 7. Other widgets are placeholders. Write their FULL content so an editor can paste it straight into the Educative widget. Use exactly these wrappers:
 [[Slides widget]]
@@ -551,7 +552,7 @@ ${args.answer}
 - Each image must teach something the prose explains: a step-by-step walkthrough, an architecture, a data layout, a before/after, or how a fix changes the state. Never decorative.
 - Pick a different section for each image, where a picture helps the most.
 - description: 2–3 sentences describing exactly what the illustration shows: the specific components, their labels, the values from the Answer, and the arrows or data flow between them.
-- caption: a short caption in sentence case.
+- caption: it is also the image's alt text on Educative. 8–20 words, at most 125 characters, sentence case, saying what the image shows for a reader who can't see it (the subject and the key relationship or result). Don't start with "Image of", "Diagram showing" or "Figure"; never generic ("Diagram", "Example"); use the primary keyword when it fits naturally; unique per image.
 
 Return ONLY a JSON object:
 { "images": [ { "heading": "<exact heading text from the list>", "description": "<text>", "caption": "<text>" } ] }`;

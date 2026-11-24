@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBlog, updateBlog } from '@/lib/storage';
-import { isEducativeConfigured, pushAnswerDraft } from '@/lib/educative';
+import { isEducativeConfigured, parseAnswerId, pushAnswerDraft } from '@/lib/educative';
 
 export const runtime = 'nodejs';
 
@@ -15,13 +15,15 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
   if (!record.markdown) return NextResponse.json({ error: 'Shot has no content yet' }, { status: 400 });
 
   const ed = record.edpresso || {};
+  // A Shot made to replace an existing Answer always targets that Answer, even if the first push failed.
+  const replaceId = parseAnswerId(record.request.existingAnswerUrl);
   try {
     const educative = await pushAnswerDraft({
       title: record.finalTitle || record.request.blogTitle,
       markdown: record.markdown,
       tags: (ed.keywords || []).slice(0, 5),
       slug: ed.slug,
-      shotId: ed.educative?.shotId,
+      ...(replaceId ? { shotId: replaceId, replaceExisting: true } : { shotId: ed.educative?.shotId }),
     });
     const { educativeError: _dropped, ...rest } = ed;
     await updateBlog(params.id, { edpresso: { ...rest, educative } });

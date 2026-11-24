@@ -43,7 +43,7 @@ Open [http://localhost:3000](http://localhost:3000). No login is required.
 
 The pipeline lives in `lib/edpressoPipeline.ts`. Its prompts are in `lib/edpressoPrompts.ts` and are registered for editing in `lib/edpressoPromptsRegistry.ts`.
 
-**Inputs:** a title or search query, target keywords, FAQs (one per line), an optional language, an Answer type (or auto-detect), up to 3 optional competitor URLs, and up to 2 optional Educative course links.
+**Inputs:** a title or search query, target keywords, FAQs (one per line), an optional language, an Answer type (or auto-detect), up to 3 optional competitor URLs, up to 2 optional Educative course links, and an optional editor link of an existing Answer to replace (for example `https://www.educative.io/editor/answereditor/6241014612361216`).
 
 **Answer types and body word budgets** (`ANSWER_TYPES`):
 
@@ -70,11 +70,13 @@ Each type has its own section structure, which is passed into the prompts as a s
 8. `seo-meta` and `images` run in parallel. As in the blog pipeline, images are required: the outline and writer must include the type's image count. If the draft still has fewer, `image-plan` adds the missing image tags to the sections that benefit most before generation.
 9. `assemble` builds the preview HTML and copy-ready Markdown.
 10. `educative` creates the Answer as an unpublished draft on educative.io (`lib/educative.ts`). It runs only when `EDUCATIVE_FLASK_AUTH` is set. A failure does not fail the run. Use **Send to Educative** or **Update on Educative** on the Shot page to retry or push edits to the same draft.
+    When an existing Answer link was given, no new Answer is created. That Answer's whole content, title and tags are replaced by the Shot. Its published URL, canonical URL, programming and topic tags, and Docker setup are kept, so the live link doesn't change. The live page updates only when a reviewer publishes. The link and access to the Answer are checked before generation starts.
 
 **Markdown format** (`lib/edpressoAssemble.ts`, safe on client and server): the saved Markdown is the single source of truth.
 
 - The writer emits code and tables inside `[code]` and `[table]` tags, so line references match the code.
 - Each `[image]` tag gets a `[Url]` once its image is generated.
+- Image alt text: Educative's Image widget has no separate alt field. The published page uses the caption as the image's `alt` and `title`. So every caption is written as alt text: 8–20 words and at most 125 characters, saying what the image shows. A missing or generic caption ("Diagram", "Figure 2") is rebuilt from the image description (`imageAltText` in `lib/edpressoAssemble.ts`).
 - Other widgets are `[[Quiz widget]] … [[/Quiz widget]]`-style placeholders that carry the full content: Quiz, FAQ, Pause and think (an open question with a hidden answer), Callout (the opening hook), Terminal (commands to try), Slides and LaTeX. When a Shot is sent to Educative, FAQ becomes an FAQ Accordion widget, Quiz a Quiz widget, and Pause and think a StructuredQuiz widget. The rest stay as labelled placeholders for the reviewer.
 - Keyword popups use `#key# term: definition #key#`.
 

@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { startEdpressoRun, subscribe, isLive, reconcileOrphan } from '@/lib/runManager';
 import { listBlogs } from '@/lib/storage';
+import { getAnswer, isEducativeConfigured, parseAnswerId } from '@/lib/educative';
 
 export const runtime = 'nodejs';
 export const maxDuration = 600;
@@ -23,6 +24,24 @@ export async function GET() {
 // POST /api/edpresso — start a run and stream its events as SSE.
 export async function POST(req: NextRequest) {
   const body = await req.json();
+  // Replacing an existing Answer: check the link and that the account can open the Answer before
+  // spending minutes generating content for it.
+  const existing = String(body?.existingAnswerUrl || '').trim();
+  if (existing) {
+    const shotId = parseAnswerId(existing);
+    if (!shotId) {
+      return Response.json({ error: `Not an Answer editor link: "${existing}". Use a link like https://www.educative.io/editor/answereditor/6241014612361216` }, { status: 400 });
+    }
+    if (!isEducativeConfigured()) {
+      return Response.json({ error: 'Replacing an existing Answer needs EDUCATIVE_FLASK_AUTH in .env.local' }, { status: 400 });
+    }
+    try {
+      await getAnswer(shotId);
+    } catch (e: any) {
+      return Response.json({ error: String(e?.message || e) }, { status: 400 });
+    }
+    body.existingAnswerUrl = existing;
+  }
   const handle = startEdpressoRun(body);
 
   const stream = new ReadableStream({

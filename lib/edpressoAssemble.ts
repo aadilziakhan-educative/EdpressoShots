@@ -41,7 +41,37 @@ export function parseTableTag(inner: string): { title: string; table: string } {
 
 export function parseImageTag(inner: string): { description: string; caption: string; url: string } {
   const pick = (tag: string) => (inner.match(new RegExp(`\\[${tag}\\]([\\s\\S]*?)\\[\\/${tag}\\]`, 'i'))?.[1] || '').trim();
-  return { description: pick('Description'), caption: pick('Caption'), url: pick('Url') };
+  const description = pick('Description');
+  // The caption doubles as alt text, so a missing or generic one is rebuilt from the description.
+  return { description, caption: imageAltText(pick('Caption'), description), url: pick('Url') };
+}
+
+// Educative's Image widget has no separate alt field: the published Answer page renders the caption
+// as the image's alt and title (an empty caption becomes the generic alt "image widget"). So the
+// caption is the alt text, and it must describe what the image shows.
+export const ALT_TEXT_MAX = 125;
+const GENERIC_ALT_RE = /^(an?\s+|the\s+)?(image|picture|diagram|illustration|figure|graphic|screenshot|chart|visual)(\s+\d+)?\.?$/i;
+
+export function imageAltText(caption: string, description: string): string {
+  const clean = (s: string) => s.replace(/\s+/g, ' ').replace(/^(an?\s+)?(image|picture|illustration|diagram)\s+(of|showing)\s+/i, '').trim();
+  const fit = (s: string) => {
+    if (s.length <= ALT_TEXT_MAX) return s;
+    let cut = s.slice(0, ALT_TEXT_MAX + 1).replace(/\s+\S*$/, '');
+    // Don't end on a dangling connector ("… and then").
+    for (let prev = ''; prev !== cut;) {
+      prev = cut;
+      cut = cut.replace(/[,;:\s-]+$/, '').replace(/\s+(and|or|then|to|of|the|a|an|with|into|until|for|from|by|in|on|at|as|which|that|while)$/i, '');
+    }
+    return cut || s.slice(0, ALT_TEXT_MAX);
+  };
+  const cap = clean(caption || '');
+  if (cap && !GENERIC_ALT_RE.test(cap) && cap.split(' ').length >= 3) return fit(cap.charAt(0).toUpperCase() + cap.slice(1));
+  // Fall back to the first sentence of the description, minus "The illustration shows …" framing.
+  const first = clean((description || '').split(/(?<=[.!?])\s+/)[0] || '')
+    .replace(/^(the|this)\s+(illustration|image|diagram|figure|picture|graphic)\s+(shows|depicts|illustrates|displays)\s+/i, '')
+    .replace(/\.$/, '');
+  if (first) return fit(first.charAt(0).toUpperCase() + first.slice(1));
+  return cap;
 }
 
 // Split the tagged Markdown into prose (with EDPSEG tokens) and ordered widget segments.

@@ -28,7 +28,7 @@ import { sanitizeText } from './transforms';
 import { generateGptImage, slugify } from './imageGen';
 import { getAbortSignal } from './abortContext';
 import { edpressoToHtml, countBodyWords, countSegments, parseImageTag } from './edpressoAssemble';
-import { isEducativeConfigured, pushAnswerDraft } from './educative';
+import { answerEditorUrl, isEducativeConfigured, parseAnswerId, pushAnswerDraft } from './educative';
 
 export type StageEvent =
   | { type: 'stage'; name: string; status: 'start' | 'done' | 'error'; message?: string }
@@ -49,6 +49,7 @@ export interface EdpressoInput {
   answerType?: AnswerType | 'auto';
   competitorUrls?: string; // optional, one URL per line
   courseLinks?: string;    // optional Educative course URLs to link subtly, one per line (max 2)
+  existingAnswerUrl?: string; // optional editor link of an Answer whose content this Shot replaces
 }
 
 interface AnswerTypeSpec {
@@ -908,6 +909,14 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
         stageLog('image-plan', prompt, { required: spec.images, missing }, { added });
         emit({ type: 'data', name: 'image-plan', payload: { required: spec.images, missing, added } });
       }
+      // Alt text: Educative uses the caption as the image's alt, so write the final caption into each tag.
+      draft = draft.replace(IMAGE_TAG_RE, (m, inner) => {
+        const { caption } = parseImageTag(inner);
+        if (!caption) return m;
+        return /\[Caption\][\s\S]*?\[\/Caption\]/i.test(inner)
+          ? m.replace(/\[Caption\][\s\S]*?\[\/Caption\]/i, () => `[Caption]${caption}[/Caption]`)
+          : m.replace(/\[\/image\]$/i, () => `[Caption]${caption}[/Caption][/image]`);
+      });
       const imageTags = [...draft.matchAll(IMAGE_TAG_RE)].map((m) => m[1]);
       const urls = await Promise.all(imageTags.map(async (inner, i) => {
         const { description, caption } = parseImageTag(inner);
@@ -976,12 +985,21 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     return result;
   });
 
-  // 10) Educative — create the Answer as a draft for review. A failure here keeps the local Shot;
-  // it can be sent again from the Shot page.
+  // 10) Educative — create the Answer as a draft for review, or replace the content of the existing
+  // Answer the author linked. A failure here keeps the local Shot; it can be sent again from the Shot page.
+  const replaceId = parseAnswerId(input.existingAnswerUrl);
+  if (replaceId) final.edpresso.replacesAnswer = { shotId: replaceId, editorUrl: answerEditorUrl(replaceId) };
   if (isEducativeConfigured()) {
     await stage('educative', async () => {
       try {
-        const draftInfo = await pushAnswerDraft({ title, markdown: final.markdown, tags: keywords.slice(0, 5), slug: final.edpresso.slug });
+        if (input.existingAnswerUrl?.trim() && !replaceId) throw new Error(`Not an Answer editor link: ${input.existingAnswerUrl}`);
+        const draftInfo = await pushAnswerDraft({
+          title,
+          markdown: final.markdown,
+          tags: keywords.slice(0, 5),
+          slug: final.edpresso.slug,
+          ...(replaceId ? { shotId: replaceId, replaceExisting: true } : {}),
+        });
         final.edpresso.educative = draftInfo;
         emit({ type: 'data', name: 'educative', payload: draftInfo });
       } catch (e: any) {

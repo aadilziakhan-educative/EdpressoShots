@@ -26,6 +26,7 @@ export interface SavedBlog {
     answerType?: string;
     competitorUrls?: string;
     courseLinks?: string;
+    existingAnswerUrl?: string; // editor link of the Educative Answer this Shot replaces
   };
   // pipeline outputs
   finalTitle?: string;

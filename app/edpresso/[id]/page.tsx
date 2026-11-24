@@ -255,7 +255,7 @@ export default function EdpressoRunPage() {
                 <a className="btn-secondary" href={ed.educative.editorUrl} target="_blank" rel="noreferrer">Open in Educative</a>
               )}
               <button className="btn-secondary" disabled={pushing} onClick={sendToEducative}>
-                {pushing ? 'Sending…' : ed.educative ? 'Update on Educative' : 'Send to Educative'}
+                {pushing ? 'Sending…' : ed.educative || ed.replacesAnswer ? 'Update on Educative' : 'Send to Educative'}
               </button>
             </>
           )}
@@ -279,12 +279,17 @@ export default function EdpressoRunPage() {
       {err && <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm">{err}</div>}
       {isDone && ed.educativeError && (
         <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm break-words">
-          Could not create the Answer on Educative: {ed.educativeError}
+          {ed.replacesAnswer ? (
+            <>Could not replace the content of <a className="underline" href={ed.replacesAnswer.editorUrl} target="_blank" rel="noreferrer">the existing Answer</a>: </>
+          ) : 'Could not create the Answer on Educative: '}
+          {ed.educativeError}
         </div>
       )}
       {isDone && ed.educative && !ed.educativeError && (
         <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 p-4 text-sm">
-          Draft Answer created on Educative for review (not published).{' '}
+          {ed.educative.replacedExisting
+            ? 'Replaced the content of the existing Answer on Educative. The live page changes only when a reviewer publishes it. '
+            : 'Draft Answer created on Educative for review (not published). '}
           <a className="underline" href={ed.educative.editorUrl} target="_blank" rel="noreferrer">Open it in the editor</a>.
           {ed.educative.imageFailures > 0 && ` ${ed.educative.imageFailures} image(s) could not be uploaded and appear as placeholders.`}
         </div>
