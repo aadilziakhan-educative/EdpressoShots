@@ -21,7 +21,8 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
     const educative = await pushAnswerDraft({
       title: record.finalTitle || record.request.blogTitle,
       markdown: record.markdown,
-      tags: (ed.keywords || []).slice(0, 5),
+      tags: (ed.keywords || []).length ? (ed.keywords || []).slice(0, 5) : (ed.tags || []),
+      programmingTags: ed.programmingTags || [],
       slug: ed.slug,
       ...(replaceId ? { shotId: replaceId, replaceExisting: true } : { shotId: ed.educative?.shotId }),
     });

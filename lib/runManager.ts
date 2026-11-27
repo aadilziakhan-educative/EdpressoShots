@@ -84,6 +84,8 @@ export function startEdpressoRun(input: EdpressoInput): RunHandle {
       competitorUrls: input.competitorUrls,
       courseLinks: input.courseLinks,
       existingAnswerUrl: input.existingAnswerUrl,
+      relatedAnswers: input.relatedAnswers,
+      relatedSentence: input.relatedSentence,
     },
     stageOutputs: {},
     stageLogs: {},

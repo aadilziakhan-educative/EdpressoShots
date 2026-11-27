@@ -18,7 +18,7 @@ const StageOutputs = dynamic(
 
 const STAGE_ORDER = [
   'classify', 'competitor-research', 'link-discovery', 'faq-check', 'link-verify', 'outline', 'quote-check', 'writer',
-  'reviewer', 'word-count', 'code-check', 'keyword-cap', 'word-trim', 'link-guard', 'course-links', 'seo-meta', 'image-plan', 'images', 'transitions', 'assemble', 'educative',
+  'reviewer', 'word-count', 'author-faqs', 'code-check', 'coverage', 'keyword-cap', 'word-trim', 'link-guard', 'course-links', 'doc-check', 'body-links', 'related-answers', 'faq-links', 'seo-meta', 'image-plan', 'images', 'transitions', 'assemble', 'educative',
 ];
 
 type View = 'preview' | 'copy' | 'links' | 'edit' | 'debug';
@@ -224,7 +224,7 @@ export default function EdpressoRunPage() {
               {ed.answerTypeLabel && <span className="pill">{ed.answerTypeLabel}</span>}
               {ed.language && ed.language !== 'none' && <span className="pill">{ed.language}</span>}
               {budget > 0 && (
-                <span className={`pill ${overBudget ? 'pill-error' : 'pill-success'}`} title="Body words (excludes code, tables, images, widget placeholders, and FAQ answers)">
+                <span className={`pill ${overBudget ? 'pill-error' : 'pill-success'}`} title="Body words (excludes code, tables, images, widget placeholders, FAQ answers, and **Line N:** code explanations)">
                   {wordCount} / {budget} words
                 </span>
               )}
@@ -301,11 +301,11 @@ export default function EdpressoRunPage() {
           <ul className="list-disc ml-5 mt-1">{missingFaqs.map((q) => <li key={q}>{q}</li>)}</ul>
         </div>
       )}
-      {isDone && (ed.droppedAuthorFaqs || []).length > 0 && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 p-4 text-sm">
-          These FAQs you gave were left out because they drift from this Answer's exact question (they target other searches). Add any back with Edit if you want them:
+      {isDone && (ed.courseLinks || []).some((l: any) => l.status === 'missing') && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm break-words">
+          Course links are required, but these could not be placed on fitting words. Add each one with Edit, on words that name something the course teaches:
           <ul className="list-disc ml-5 mt-1">
-            {ed.droppedAuthorFaqs.map((f: any) => <li key={f.question}>{f.question}{f.reason ? ` — ${f.reason}` : ''}</li>)}
+            {(ed.courseLinks || []).filter((l: any) => l.status === 'missing').map((l: any) => <li key={l.url}>{l.url}</li>)}
           </ul>
         </div>
       )}

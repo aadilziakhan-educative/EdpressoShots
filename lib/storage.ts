@@ -27,6 +27,8 @@ export interface SavedBlog {
     competitorUrls?: string;
     courseLinks?: string;
     existingAnswerUrl?: string; // editor link of the Educative Answer this Shot replaces
+    relatedAnswers?: string;    // series or prerequisite Answer links, one per line (max 2)
+    relatedSentence?: string;   // optional Callout sentence for them
   };
   // pipeline outputs
   finalTitle?: string;

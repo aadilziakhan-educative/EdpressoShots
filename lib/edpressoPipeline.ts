@@ -7,7 +7,7 @@
 //
 // The writer produces code and tables itself (inside [code]/[table] tags)
 // so line-by-line explanations always match the code. Only images are generated separately.
-// Widgets Educative has but we cannot produce (quiz, FAQ, callout, slides, LaTeX) are emitted as
+// Widgets (quiz, FAQ, callout, slides, LaTeX, terminal, pause and think) are emitted as
 // [[X widget]] … [[/X widget]] placeholders carrying their full content. The last stage creates the
 // Answer as an unpublished draft on educative.io (lib/educative.ts); a human reviewer publishes it.
 
@@ -30,12 +30,23 @@ import {
   edpressoCodeVerdictPrompt,
   edpressoCodeFixPrompt,
   edpressoTrimPrompt,
+  edpressoCoverageCheckPrompt,
+  edpressoCoverageFixPrompt,
+  edpressoImageSyncPrompt,
+  edpressoRelatedCalloutPrompt,
+  edpressoCourseLinkRewritePrompt,
+  edpressoDocCheckPrompt,
+  edpressoFaqSearchTermsPrompt,
+  edpressoFaqLinkPrompt,
+  edpressoFaqAnswerPrompt,
+  edpressoAssessPrompt,
 } from './edpressoPromptsRegistry';
 import { sanitizeText } from './transforms';
 import { generateGptImage, slugify } from './imageGen';
+import katex from 'katex';
 import { getAbortSignal } from './abortContext';
-import { edpressoToHtml, countBodyWords, countSegments, parseImageTag, parseCodeTag } from './edpressoAssemble';
-import { answerEditorUrl, isEducativeConfigured, parseAnswerId, pushAnswerDraft, runCode, type CodeRunResult } from './educative';
+import { edpressoToHtml, countBodyWords, countSegments, parseImageTag, parseCodeTag, parseSlides, normalizeKeywordSyntax } from './edpressoAssemble';
+import { answerEditorUrl, getAnswer, readAnswerForReview, isEducativeConfigured, parseAnswerId, pushAnswerDraft, runCode, searchAnswers, type CodeRunResult } from './educative';
 
 export type StageEvent =
   | { type: 'stage'; name: string; status: 'start' | 'done' | 'error'; message?: string }
@@ -57,6 +68,8 @@ export interface EdpressoInput {
   competitorUrls?: string; // optional, one URL per line
   courseLinks?: string;    // optional Educative course URLs to link subtly, one per line (max 2)
   existingAnswerUrl?: string; // optional editor link of an Answer whose content this Shot replaces
+  relatedAnswers?: string;    // optional series or prerequisite Answer links, one per line (max 2)
+  relatedSentence?: string;   // optional sentence for the Callout that links them
 }
 
 interface AnswerTypeSpec {
@@ -132,7 +145,7 @@ Order:
 3. "## What is <concept>?" — a 40–60 word definition, then history (who introduced it and when) if relevant, and what the name stands for if it is an abbreviation.
 4. Motivation tied to the hook: why it matters, with real-world uses only where they connect to the running example or the problem it solves.
 5. The problem it solves, with a concrete example using real values.
-6. How it works: a step-by-step walkthrough (dry run) on the concrete example. Illustrate the walkthrough with images (a Slides widget placeholder may hold any further steps).
+6. How it works: a step-by-step walkthrough (dry run) on the concrete example. Illustrate the walkthrough with a Slides widget: one slide per step on the concrete example.
 7. Formulas or complexity (Big O) in a LaTeX widget placeholder, with an explanation of where they come from.
 8. Code: the bigger picture first, then a runnable [code] tag on the same example as the walkthrough, then a line-by-line explanation. A Pause and think widget after the walkthrough or the code, on the likeliest confusion.
 9. When the title compares related concepts, give each its own "What is…" subsection and end with a comparison table.
@@ -158,8 +171,15 @@ Order:
   },
 };
 
-const NARROW_MAX_WORDS = 600;
-const NARROW_NOTE = `Narrow topic: keep it short and focused on this one question. Key takeaways: 3–4 bullets. Explain the parent concept in one or two sentences only. No closing summary section. Skip the comparison table unless there are three or more methods, and never repeat the takeaways in it. FAQs: 5–8.`;
+const NARROW_MAX_WORDS = 800;
+const NARROW_NOTE = `Narrow topic: keep it short and focused on this one question; this order replaces the one above where they differ.
+1. Direct answer, hook, key takeaways (3–4 bullets).
+2. A "##" section that answers the core question the way people search it (for example "What does nstart do in kmeans()?"): a 40–60 word definition, with the parent concept in one or two sentences at most.
+3. Right after it, the first runnable program: the basic usage on the running example, so code appears in the first third of the Answer.
+4. One section on how it works, with one walkthrough (a Slides widget or a numbered list, not both). Don't split "why it matters", "the problem it solves", and "how it changes the result" into separate sections.
+5. The most searched warning or error and the documented edge cases (for example, an argument that is ignored in some case), each with a short runnable program where it can be shown.
+6. A Pause and think widget, the Quiz, a one- or two-sentence closing with a decision rule (never a summary), then the FAQ. No "popular implementations" or "background" section.
+Skip the comparison table unless there are three or more methods, and never repeat the takeaways in it. FAQs: 5–8.`;
 
 const INTERNAL_HOSTS = ['educative.io', 'how.dev'];
 // E-learning competitors and low-authority sites we never link to (the slides: "never link to
@@ -174,6 +194,7 @@ const BLOCKED_HOSTS = [
 ];
 const MAX_LINK_CANDIDATES = 30;
 export const MAX_COURSE_LINKS = 2;
+export const MAX_RELATED_ANSWERS = 2;
 const LINK_TIMEOUT_MS = 12_000;
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
@@ -290,6 +311,7 @@ function isSafeRewrite(before: string, after: string): boolean {
 }
 
 const IMAGE_TAG_RE = /\[image\]([\s\S]*?)\[\/image\]/g;
+const SLIDES_WIDGET_RE = /\[\[Slides widget\]\]([\s\S]*?)\[\[\/Slides widget\]\]/g;
 
 // Classify each line as a "##"/"###" heading, plain prose, a list item, a block line, or other (blank,
 // blockquote, table row). Lines of code fences, [code]/[table]/[image] tags, and [[… widget]]
@@ -467,12 +489,67 @@ export function linkableSentences(md: string): { line: number; start: number; te
 
 // Links the first occurrence of `anchor` in the sentence, only when it is one to five words that sit
 // outside inline code and bold markers and do not name the course.
+// What a course teaches, from its page: the <title> and meta description (falls back to the URL slug).
+const courseInfoCache = new Map<string, string>();
+export async function courseInfo(url: string): Promise<string> {
+  if (courseInfoCache.has(url)) return courseInfoCache.get(url)!;
+  let info = '';
+  try {
+    const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' }, signal: linkSignal() });
+    const html = res.ok ? (await res.text()).slice(0, 400_000) : '';
+    const pick = (re: RegExp) => (html.match(re)?.[1] || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
+    const title = pick(/<title[^>]*>([^<]+)<\/title>/i);
+    const desc = pick(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) || pick(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+    info = [title, desc].filter(Boolean).join(' — ');
+  } catch (e: any) {
+    if (getAbortSignal()?.aborted) throw e;
+  }
+  info = info || courseTopic(url);
+  courseInfoCache.set(url, info);
+  return info;
+}
+
+const ANCHOR_STOP = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'your', 'you', 'are', 'how', 'what', 'when', 'use', 'using', 'learn', 'course', 'path', 'educative',
+  // Words every course description uses; a match on these says nothing about the topic.
+  'random', 'data', 'basic', 'basics', 'programming', 'master', 'advanced', 'topics', 'work', 'working', 'developer', 'developers', 'beginner', 'beginners', 'skills', 'scratch', 'online', 'major', 'years', 'used', 'powered', 'learning', 'hands', 'interactive', 'explore']);
+const contentWords = (t: string) => t.toLowerCase().replace(/['’]s\b/g, '').split(/[^a-z0-9+#]+/).filter((w) => w.length >= 3 && !ANCHOR_STOP.has(w));
+
+// An anchor relates to the course when one of its content words (or a word with the same 5-letter stem)
+// appears in the course's title or description.
+export function relatesToCourse(anchor: string, info: string, language = ''): boolean {
+  // Naming the language the course teaches counts ("R's stats package" for an R course).
+  // Only a noun phrase that names the language or one of its features counts: "base R", "R code",
+  // "R functions", "R's stats package". A clause that merely contains "R" doesn't.
+  const lang = language.trim();
+  if (lang && lang !== 'none') {
+    const esc = lang.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const flags = lang.length <= 2 ? '' : 'i';
+    const feature = '(?:code|programming|functions?|packages?|library|libraries|scripts?|syntax|data frames?|vectors?|lists?|language|console|environment)';
+    const named = new RegExp(`^(?:base ${esc}|${esc} ${feature}|${esc}['’]s (?:[a-z]+ ){0,2}${feature}|(?:the )?${esc} (?:[a-z]+ ){0,1}${feature})$`, flags);
+    if (named.test(anchor.trim()) && new RegExp(`(^|[^A-Za-z])${esc}(?![A-Za-z])`, flags).test(info)) return true;
+  }
+  const topic = contentWords(info);
+  if (!topic.length) return true;
+  const stems = new Set(topic.map((w) => w.slice(0, 5)));
+  return contentWords(anchor).some((w) => stems.has(w.slice(0, 5)));
+}
+
+function insideInlineCode(text: string, offset: number): boolean {
+  return (text.slice(0, offset).match(/`/g) || []).length % 2 === 1;
+}
+
 // Anchors that say nothing about what the link teaches ("the first method", "this approach").
 const GENERIC_ANCHOR_RE = /^(the|this|that|these|those|a|an|our|its)?\s*(first|second|third|last|next|previous|following|above|below|same|other|default)?\s*(method|methods|step|steps|approach|approaches|way|ways|one|option|options|section|example|examples|program|code|result|results|here|it)$/i;
 
-function placeCourseLink(md: string, s: { line: number; start: number; text: string }, anchor: string, url: string): string | null {
+function placeCourseLink(md: string, s: { line: number; start: number; text: string }, anchor: string, url: string, info = '', language = ''): string | null {
   const a = anchor.trim();
+  if (info && !relatesToCourse(a, info, language)) return null;
   if (!a || a.split(/\s+/).length > 5 || isCourseNameAnchor(a, url) || GENERIC_ANCHOR_RE.test(a)) return null;
+  // Fragments read badly as links: a possessive ("running R's"), a verb phrase ("running …", "using …"),
+  // or an anchor that only modifies the inline code right after it ("[Base R] `stats::kmeans()`").
+  if (/['’]s$/i.test(a) || /^(running|using|calling|applying|setting|passing|making|getting|trying|doing|creating|writing|reading|adding|choosing|picking)\b/i.test(a)) return null;
+  const afterAnchor = s.text.slice(s.text.indexOf(a) + a.length);
+  if (/^\s*`/.test(afterAnchor) || /^['’]s\b/.test(afterAnchor)) return null;
   // At least one content word of four or more letters (rejects anchors such as "R's" or "in R").
   if (!a.split(/\s+/).some((w) => /^[A-Za-z][\w+#.-]{3,}$/.test(w.replace(/['’]s$/, '')) && !/^(this|that|with|from|into|when|then|than|your|their|which|where|there|these|those|about)$/i.test(w))) return null;
   const at = s.text.indexOf(a);
@@ -488,7 +565,7 @@ function placeCourseLink(md: string, s: { line: number; start: number; text: str
 // Makes every course link appear exactly once, subtly, in the Answer body. Sentences that advertise a
 // course are deleted (they teach nothing); each course left unlinked is then placed on existing words of
 // a numbered candidate sentence the model picks, so no sentence is ever rewritten.
-export async function weaveCourseLinks(md: string, courseUrls: string[], title: string): Promise<{
+export async function weaveCourseLinks(md: string, courseUrls: string[], title: string, language = ''): Promise<{
   markdown: string; links: CourseLinkStatus[]; removedSentences: string[]; applied: any[]; prompt?: string; picks?: any[];
 }> {
   let audit = auditCourseLinks(md, courseUrls);
@@ -509,13 +586,15 @@ export async function weaveCourseLinks(md: string, courseUrls: string[], title: 
   let picks: any[] = [];
   let prompt = '';
   let todo = missing;
+  const infos = new Map<string, string>();
+  for (const l of missing) infos.set(l.url, await courseInfo(l.url));
   // Two tries: the second one is told which anchors were rejected and why.
   for (let attempt = 1; attempt <= 2 && todo.length; attempt++) {
     prompt = edpressoCourseLinkPrompt({
       title,
-      tasks: todo.map((l) => `- ${l.url} (teaches: ${courseTopic(l.url)})`).join('\n'),
+      tasks: todo.map((l) => `- ${l.url} (teaches: ${infos.get(l.url) || courseTopic(l.url)})`).join('\n'),
       sentences: candidates.map((c, i) => `${i + 1}. ${c.text}`).join('\n'),
-      feedback: attempt === 1 ? '' : `# Rejected earlier (pick different words)\n${(picks.map((p) => `- "${p?.anchor}" in sentence ${p?.sentence}: ${p?._why || 'not usable'}`).join('\n'))}`,
+      feedback: attempt === 1 ? '' : `# Rejected earlier (pick different words)\n${(picks.map((p) => `- "${p?.anchor}" in sentence ${p?.sentence}: ${p?._why || 'not usable'}`).join('\n'))}${used.size ? `\n\nSentences that already hold a course link (choose any other): ${candidates.map((c, i) => (used.has(c.line) ? i + 1 : 0)).filter(Boolean).join(', ')}` : ''}`,
     });
     try {
       // The default model: choosing words that relate to the course is a judgement call.
@@ -532,15 +611,75 @@ export async function weaveCourseLinks(md: string, courseUrls: string[], title: 
         const anchor = String(pick?.anchor || '');
         if (!candidates[n]) { pick._why = 'no such sentence'; continue; }
         if (used.has(candidates[n].line)) { pick._why = 'that sentence already has a course link'; continue; }
-        const next = placeCourseLink(d, candidates[n], anchor, l.url);
+        if (applied.some((a) => normWords(a.anchor) === normWords(anchor))) { pick._why = 'same anchor as another course link'; continue; }
+        const next = placeCourseLink(d, candidates[n], anchor, l.url, infos.get(l.url) || '', language);
         if (next) { d = next; used.add(candidates[n].line); applied.push({ url: l.url, sentence: candidates[n].text, anchor }); break; }
         pick._why = /[`*]/.test(anchor) ? 'contains inline code or bold'
+          : !relatesToCourse(anchor, infos.get(l.url) || '', language) ? 'does not name anything the course teaches (see its description)'
           : !candidates[n].text.includes(anchor.trim()) ? 'not copied exactly from the sentence'
           : 'too generic, too long, or names the course';
       }
     }
     const linked = new Set(applied.map((a) => a.url));
     todo = todo.filter((l) => !linked.has(l.url));
+  }
+  // Last resort for a course about the language itself: link a phrase that names the language ("base R",
+  // "R code", "R functions", "Python packages") in a sentence that has none yet.
+  if (todo.length && language) {
+    const esc = language.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const flags = language.length <= 2 ? 'g' : 'gi';
+    const phraseRe = new RegExp(`\\b(?:base ${esc}|${esc} (?:code|programming|functions?|packages?|scripts?|data frames?|vectors?|syntax))\\b`, flags);
+    for (const l of todo) {
+      for (const c of candidates) {
+        if (used.has(c.line)) continue;
+        const m = [...c.text.matchAll(phraseRe)].find((x) => !insideInlineCode(c.text, x.index!) && !applied.some((a) => normWords(a.anchor) === normWords(x[0])));
+        if (!m) continue;
+        const next = placeCourseLink(d, c, m[0], l.url, infos.get(l.url) || '', language);
+        if (next) { d = next; used.add(c.line); applied.push({ url: l.url, sentence: c.text, anchor: m[0], fallback: true }); break; }
+      }
+    }
+  }
+  // Course links are required. Still missing: one existing sentence is rewritten minimally so it names
+  // something the course teaches, then the link goes on that phrase (two tries, with the reasons).
+  {
+    const linkedNow = new Set(applied.map((a) => a.url));
+    for (const l of todo.filter((x) => !linkedNow.has(x.url))) {
+      let feedback = '';
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const cands = linkableSentences(d).filter((c) => !used.has(c.line));
+        if (!cands.length) break;
+        const rwPrompt = edpressoCourseLinkRewritePrompt({
+          title, course: `- ${l.url} (teaches: ${infos.get(l.url) || courseTopic(l.url)})`,
+          sentences: cands.map((c, i) => `${i + 1}. ${c.text}`).join('\n'), feedback,
+        });
+        let pick: any = {};
+        try { pick = parseJsonLoose(await openaiJSON(rwPrompt)); } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+        const c = cands[Number(pick?.sentence) - 1];
+        const rewritten = String(pick?.rewritten || '').trim();
+        const anchor = String(pick?.anchor || '').trim();
+        const keep = (t: string) => [...t.matchAll(/`[^`]*`|\]\([^)]*\)|#key#/g)].map((m) => m[0]).sort().join('|');
+        const why = !c ? 'no such sentence'
+          : !rewritten || !anchor ? 'empty answer'
+          : rewritten.split(/\s+/).length > c.text.split(/\s+/).length + 12 ? 'too much longer than the original'
+          : /[.!?]\s+[A-Z]/.test(rewritten.replace(/`[^`]*`/g, '')) ? 'became more than one sentence'
+          : keep(rewritten) !== keep(c.text) ? 'changed inline code, links, or popups'
+          : EXPLICIT_CTA_RE.test(rewritten) || POINTER_RE.test(rewritten) ? 'reads as an advert'
+          : rewritten.split(anchor).length !== 2 ? 'anchor not found exactly once'
+          : applied.some((a) => normWords(a.anchor) === normWords(anchor)) || /\]\(/.test(d) && [...d.matchAll(MD_LINK_RE)].some((m) => !m[1] && normWords(m[2]) === normWords(anchor)) ? 'same anchor as another link; use a different phrase'
+          : '';
+        if (!why) {
+          const lines = d.split('\n');
+          lines[c.line] = lines[c.line].slice(0, c.start) + lines[c.line].slice(c.start).replace(c.text, () => rewritten);
+          const updated = lines.join('\n');
+          const target = linkableSentences(updated).find((x) => x.line === c.line && x.text.includes(anchor));
+          const next = target ? placeCourseLink(updated, target, anchor, l.url, infos.get(l.url) || '', language) : null;
+          if (next) { d = next; used.add(c.line); applied.push({ url: l.url, sentence: rewritten, anchor, rewritten: true }); break; }
+          feedback = `# Rejected earlier\n- "${anchor}": it must be a short noun phrase naming something the course teaches (as its description says), outside inline code and not right before it.`;
+        } else {
+          feedback = `# Rejected earlier\n- sentence ${pick?.sentence}: ${why}.`;
+        }
+      }
+    }
   }
   audit = auditCourseLinks(d, courseUrls);
   return { markdown: audit.markdown, links: audit.links, removedSentences, applied, prompt, picks };
@@ -652,6 +791,18 @@ export function stripCodeMarkers(code: string): string {
   return m ? m[1].replace(/\s+$/, '') : code;
 }
 
+// After a prose-only rewrite (trim, coverage), the programs that were run and checked go back in exactly,
+// tag by tag, so a rewrite that touched code is repaired instead of thrown away.
+export function restoreCode(out: string, original: string): string {
+  const want = codeTags(original);
+  if (!want.length || codeTags(out).length !== want.length) return out;
+  let i = 0;
+  return out.replace(CODE_TAG_RE, (tag) => {
+    const code = want[i++].code;
+    return tag.replace(FENCE_IN_TAG_RE, (_m: string, open: string, _c: string, close: string) => `${open}${code}\n${close}`);
+  });
+}
+
 function codeTags(md: string): { start: number; end: number; language: string; caption: string; code: string }[] {
   return [...md.matchAll(CODE_TAG_RE)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, ...parseCodeTag(m[1]) }));
 }
@@ -678,6 +829,79 @@ function numberedListing(code: string): string {
   const lines = code.split('\n');
   const w = String(lines.length).length;
   return lines.map((l, i) => `${String(i + 1).padStart(w, ' ')} | ${l}`).join('\n');
+}
+
+// A variable named after a built-in function (R's c(), Python's list()) works but teaches a bad habit.
+const SHADOWABLE: Record<string, { names: string[]; assign: (n: string) => RegExp }> = {
+  r: { names: ['c', 't', 'T', 'F', 'df', 'data', 'list', 'mean', 'sum', 'max', 'min', 'length', 'names', 'matrix', 'vector'], assign: (n) => new RegExp(`(^|[\\s;({])${n}\\s*(<-|=(?!=))`, 'm') },
+  python: { names: ['list', 'dict', 'str', 'sum', 'max', 'min', 'id', 'type', 'input', 'len', 'set', 'map', 'filter', 'object', 'range'], assign: (n) => new RegExp(`(^|[\\s;(,])${n}\\s*=(?!=)`, 'm') },
+};
+export function shadowedBuiltin(language: string, code: string): string | null {
+  const spec = SHADOWABLE[String(language).toLowerCase()];
+  if (!spec) return null;
+  // Ignore named arguments inside calls such as kmeans(x, centers = 3) by checking line starts only for "=".
+  for (const n of spec.names) {
+    const lineStart = new RegExp(`^\\s*${n}\\s*(<-|=(?!=))`, 'm');
+    if (lineStart.test(code)) return n;
+  }
+  return null;
+}
+
+// The "**Line N:**" explanation belongs directly under its program: move it up when output notes, an image,
+// or a note got between them.
+export function moveLineExplanations(md: string): string {
+  const tags = [...md.matchAll(CODE_TAG_RE)];
+  let out = md;
+  for (let i = tags.length - 1; i >= 0; i--) {
+    const end = tags[i].index! + tags[i][0].length;
+    const nextTag = tags[i + 1]?.index ?? out.length;
+    let section = out.slice(end, nextTag);
+    const stop = section.search(/^#{2,3}\s/m);
+    if (stop >= 0) section = section.slice(0, stop);
+    const block = section.match(/(?:^|\n)((?:[ \t]*\*\*Lines?\s+\d+[^\n]*(?:\n|$))+)/);
+    if (!block) continue;
+    const before = section.slice(0, block.index!);
+    if (!before.trim()) continue; // already directly under the code
+    const explanation = block[1].replace(/\s+$/, '');
+    const rest = section.replace(block[1], '').replace(/\n{3,}/g, '\n\n');
+    out = `${out.slice(0, end)}\n\n${explanation}\n\n${rest.replace(/^\s+/, '')}${out.slice(end + section.length)}`;
+  }
+  return out.replace(/\n{3,}/g, '\n\n');
+}
+
+const SUBSCRIPTS: Record<string, string> = { '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9', 'ₖ': 'k', 'ᵢ': 'i', 'ⱼ': 'j', 'ₙ': 'n', 'ₘ': 'm' };
+// One notation in prose: "C₁" becomes "C_1", matching "C_K".
+export function unifySubscripts(md: string): string {
+  const lines = md.split('\n');
+  const kinds = classifyLines(lines);
+  return lines.map((l, i) => (kinds[i] === 'block' ? l : l.replace(/([A-Za-zμσλα-ω])([₀-₉ₖᵢⱼₙₘ]+)/g, (_m, base, sub) => `${base}_${[...sub].map((c) => SUBSCRIPTS[c] || c).join('')}`))).join('\n');
+}
+
+// A heading that only labels the widget under it ("## Quiz", "## FAQ") duplicates the widget's own title.
+export function dropWidgetHeadings(md: string): string {
+  return md.replace(/^#{2,3}\s*(quiz|faqs?|frequently asked questions|pause and think|test your (knowledge|understanding))\s*\n+(?=\s*(\[\[(Quiz|FAQ|Pause and think) widget\]\]|EDPWIDGET\d+TOKEN))/gim, '');
+}
+
+// FAQs that ask the same thing in other words: the later one goes (author FAQs are listed first).
+export function dedupeFaqs(md: string, keep: string[] = []): string {
+  return md.replace(/\[\[FAQ widget\]\]([\s\S]*?)\[\[\/FAQ widget\]\]/, (m, body: string) => {
+    const pairs = body.split(/\n(?=\s*Q:)/).map((p) => p.trim()).filter((p) => /^Q:/.test(p));
+    const SYN: Record<string, string> = { argument: 'param', parameter: 'param', option: 'param', setting: 'param', arg: 'param', mean: 'means', function: '', clustering: '', algorithm: '', method: '' };
+    const words = (q: string) => new Set(normWords(q.replace(/^Q:\s*/, '').split('\n')[0])
+      .replace(/\bk means\b/g, 'kmeans')
+      .split(' ')
+      .map((w) => (w in SYN ? SYN[w] : w.replace(/s$/, '')))
+      .filter((w) => w.length >= 3 && !['what', 'doe', 'does', 'how', 'the', 'and', 'for', 'with', 'you', 'should', 'use', 'mean'].includes(w)));
+    const isAuthor = (p: string) => keep.some((q) => normWords(q) === normWords(p.replace(/^Q:\s*/, '').split('\n')[0]));
+    const out: string[] = [];
+    for (const p of pairs) {
+      const w = words(p);
+      const dup = out.find((o) => { const v = words(o); const inter = [...w].filter((x) => v.has(x)).length; return inter / Math.max(1, Math.min(w.size, v.size)) >= 0.8; });
+      if (dup && !isAuthor(p)) continue;
+      out.push(p);
+    }
+    return `[[FAQ widget]]\n${out.join('\n\n')}\n[[/FAQ widget]]`;
+  });
 }
 
 // ---- Terminal widget: only for command-line topics. ----
@@ -711,6 +935,85 @@ export function removeTerminalWidgets(md: string): { markdown: string; removed: 
     removed++;
   }
   return { markdown: out.replace(/\n{3,}/g, '\n\n').trim(), removed };
+}
+
+// What the body commits to, for checking the Quiz and FAQ against it: the direct answer, the key
+// takeaways, and every sentence that recommends a value or states a default.
+function answerFacts(md: string): string {
+  const lines = md.split('\n');
+  const kinds = classifyLines(lines);
+  const first = lines.find((l, i) => kinds[i] === 'prose' && !/^\s*>/.test(l)) || '';
+  const takeaways = lines.filter((l) => /^\s*>\s*-/.test(l));
+  const recs: string[] = [];
+  lines.forEach((l, i) => {
+    if (kinds[i] !== 'prose' && kinds[i] !== 'list') return;
+    for (const m of l.matchAll(/[^.!?]*\b(recommend\w*|default|use|set|between|at least|or more|typical\w*|common\w*)\b[^.!?]*\d[^.!?]*[.!?]/gi)) recs.push(m[0].trim());
+  });
+  return [first, ...takeaways, ...[...new Set(recs)].slice(0, 12).map((r) => `- ${r}`)].filter(Boolean).join('\n').slice(0, 3000) || '(none)';
+}
+
+// ---- Math: LaTeX belongs in LaTeX widgets, one formula each; prose gets plain symbols. ----
+
+const LATEX_SYMBOLS: [RegExp, string][] = [
+  [/\\mu(?![a-zA-Z])/g, 'μ'], [/\\sigma(?![a-zA-Z])/g, 'σ'], [/\\Sigma(?![a-zA-Z])|\\sum(?![a-zA-Z])/g, 'Σ'], [/\\lambda(?![a-zA-Z])/g, 'λ'], [/\\alpha(?![a-zA-Z])/g, 'α'],
+  [/\\beta(?![a-zA-Z])/g, 'β'], [/\\theta(?![a-zA-Z])/g, 'θ'], [/\\pi(?![a-zA-Z])/g, 'π'], [/\\epsilon(?![a-zA-Z])|\\varepsilon(?![a-zA-Z])/g, 'ε'], [/\\delta(?![a-zA-Z])/g, 'δ'],
+  [/\\lVert|\\rVert|\\\|/g, '‖'], [/\\in(?![a-zA-Z])/g, '∈'], [/\\leq?(?![a-zA-Z])/g, '≤'], [/\\geq?(?![a-zA-Z])/g, '≥'], [/\\neq(?![a-zA-Z])/g, '≠'],
+  [/\\cdot(?![a-zA-Z])/g, '·'], [/\\times(?![a-zA-Z])/g, '×'], [/\\approx(?![a-zA-Z])/g, '≈'], [/\\l?dots(?![a-zA-Z])|\\cdots(?![a-zA-Z])/g, '…'], [/\\infty(?![a-zA-Z])/g, '∞'],
+];
+
+function plainMath(tex: string): string {
+  let t = tex.trim();
+  for (const [re, sym] of LATEX_SYMBOLS) t = t.replace(re, sym);
+  return t.replace(/\\(text|mathrm|operatorname|mathbf)\{([^}]*)\}/g, '$2').replace(/\\[a-zA-Z]+/g, '').replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// "\( x_i \)" in prose shows as raw characters in Educative text blocks: make it inline code with plain symbols.
+export function fixInlineLatex(md: string): string {
+  const lines = md.split('\n');
+  const kinds = classifyLines(lines);
+  // Inline code that holds a LaTeX symbol command (`\\mu_k`) gets plain symbols too; other backslashes
+  // in code (such as "\\n") are left alone.
+  const symbolCmd = new RegExp(LATEX_SYMBOLS.map(([re]) => re.source).join('|'));
+  return lines.map((l, i) => (kinds[i] === 'block' ? l : l
+    .replace(/\\\((.+?)\\\)/g, (_m, tex) => `\`${plainMath(tex)}\``)
+    // "$C_1$" in prose (outside inline code; only math-looking spans, so prices and R's x$y are left alone).
+    .split(/(`[^`\n]*`)/).map((seg) => (seg.startsWith('`') ? seg : seg.replace(/\$([^$\n]{1,60})\$/g, (m, tex) => (/[\\_^]/.test(tex) && !/\s{2,}/.test(tex) ? `\`${plainMath(tex)}\`` : m)))).join('')
+    .replace(/`([^`\n]+)`/g, (m, inner) => {
+      if (!symbolCmd.test(inner)) return m;
+      let t = inner;
+      for (const [re, sym] of LATEX_SYMBOLS) t = t.replace(re, sym);
+      return `\`${t.replace(/[{}]/g, '')}\``;
+    }))).join('\n');
+}
+
+// A LaTeX widget holding several formulas (one per line, no environment) becomes one widget per formula,
+// when each line renders on its own.
+export function splitLatexWidgets(md: string): string {
+  return md.replace(/\[\[LaTeX widget\]\]([\s\S]*?)\[\[\/LaTeX widget\]\]/gi, (m, body: string) => {
+    if (/\\begin\{/.test(body)) return m;
+    const parts = body.split('\n')
+      .map((l) => l.trim().replace(/(,|;)?\s*(\\q?quad\s*)+$/, '').replace(/[,;]\s*$/, '').trim())
+      .filter(Boolean);
+    if (parts.length < 2) return m;
+    try { parts.forEach((f) => katex.renderToString(f, { displayMode: true, throwOnError: true })); } catch { return m; }
+    return parts.map((f) => `[[LaTeX widget]]\n${f}\n[[/LaTeX widget]]`).join('\n\n');
+  });
+}
+
+// A numbered list right before a Slides widget repeats its steps; the slides carry them.
+export function removeListBeforeSlides(md: string): string {
+  return md.replace(/(^|\n\n)((?:[ \t]*\d+\.\s[^\n]*\n?){3,})\n*(?=\[\[Slides widget\]\])/g, '$1');
+}
+
+// The exact keyword is never bolded, and template placeholders never ship ("— Name, role").
+export function cleanPlaceholders(md: string, phrases: string | string[]): string {
+  // No search phrase (the keyword or a related query) is ever bolded.
+  const wanted = new Set((Array.isArray(phrases) ? phrases : [phrases]).map(normWords).filter(Boolean));
+  let out = md.replace(/\*\*([^*\n]{3,80})\*\*/g, (m, inner) => (wanted.has(normWords(inner)) ? inner : m));
+  return out
+    .replace(/,\s*(role|title|position|<role>|\[role\])\s*$/gim, '')
+    .replace(/\s*\((role|TBD|TODO)\)/g, '')
+    .replace(/<(name|role|source|person)>/gi, '');
 }
 
 // ---- Quotes: used only when the exact words are on the cited page. ----
@@ -812,8 +1115,26 @@ export function keywordUses(md: string, phrase: string): { uses: KeywordUse[]; e
   });
   const firstProseLine = lines.findIndex((l, i) => kinds[i] === 'prose' && !/^\s*>/.test(l));
   const keepProse = uses.find((u) => u.kind === 'prose' && u.line === firstProseLine);
-  const keepHeading = uses.find((u) => u.kind === 'heading' && /^##\s/.test(lines[u.line]));
+  // A heading that forces the phrase into "What is …?" when the phrase is a task ("… using the nstart
+  // parameter", "how to …") reads as keyword stuffing; it is rewritten even if it is the only one.
+  // A heading that is just the phrase (it repeats the title) is rewritten too.
+  // So is one that wraps the phrase in extra words that repeat its own words ("What does nstart do in
+  // K-means clustering in R using the nstart parameter?").
+  const phraseWords = new Set(normWords(phrase).split(' ').filter((w) => w.length >= 3));
+  const repeatsPhraseWord = (h: string) => {
+    const rest = normWords(h.replace(/^#+\s*/, '')).replace(normWords(phrase), ' ').split(' ').filter((w) => w.length >= 3);
+    return rest.some((w) => phraseWords.has(w));
+  };
+  const forced = (h: string) => (/^#{2,3}\s*what\s+(is|are)\b/i.test(h) && /\b(using|with|via)\b|^how\s+to\b/i.test(phrase.trim()))
+    || normWords(h.replace(/^#+\s*/, '')) === normWords(phrase)
+    || repeatsPhraseWord(h);
+  const keepHeading = uses.find((u) => u.kind === 'heading' && /^##\s/.test(lines[u.line]) && !forced(lines[u.line]));
   return { uses, extra: uses.filter((u) => u !== keepProse && u !== keepHeading) };
+}
+
+// True when the original text already bolded these words (a label such as "**Note:**" stays bold).
+function from_has_bold(original: string, inner: string): boolean {
+  return original.includes(`**${inner}**`);
 }
 
 export async function capKeyword(md: string, phrase: string, variants: string[], title: string): Promise<{
@@ -838,7 +1159,9 @@ export async function capKeyword(md: string, phrase: string, variants: string[],
   const rewrites: { from: string; to: string }[] = [];
   const links = (s: string) => [...s.matchAll(MD_LINK_RE)].map((m) => m[0]).sort().join('|');
   extra.forEach((u, i) => {
-    let to = String(picks.find((p) => Number(p?.n) === i + 1)?.text || '').trim();
+    // Rewrites are never bolded: a bolded search phrase in a sentence reads as stuffing.
+    let to = String(picks.find((p) => Number(p?.n) === i + 1)?.text || '').trim()
+      .replace(/\*\*([^*]+)\*\*/g, (m, inner) => (from_has_bold(u.text, inner) ? m : inner));
     if (u.kind === 'heading') to = to.replace(/^#+\s*/, '');
     const from = u.kind === 'heading' ? u.text.replace(/^#+\s*/, '') : u.text;
     // Accept only a rewrite that drops the phrase and keeps links, popups, and inline code.
@@ -910,6 +1233,9 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       answerType, detectedType: detected, language,
       primaryKeyword: String(parsed.primaryKeyword || keywords[0] || title).trim(),
       commandLine: parsed.commandLine === true,
+      tags: (Array.isArray(parsed.tags) ? parsed.tags : [])
+        .map((t: any) => String(t).toLowerCase().trim().replace(/[^a-z0-9+#.]+/g, '-').replace(/^-+|-+$/g, ''))
+        .filter(Boolean).slice(0, 5) as string[],
       scope: parsed.scope === 'narrow' ? 'narrow' as const : 'broad' as const,
       reason: parsed.reason || '',
     };
@@ -932,9 +1258,16 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     ? 'Allowed: this topic is done on the command line. Use one Terminal widget for the commands readers should try, and only when every command works in the environment its Setup part creates.'
     : 'Not allowed: this topic is not a command-line task. Do not include a Terminal widget (no install, setup, or "try it in your environment" terminal); runnable programs go in [code] tags.';
   const closingRule = narrow
-    ? 'No closing section: this is a narrow topic. After the Quiz (or the last section when there is no Quiz), one sentence introduces the FAQ, so the Quiz and FAQ are never back to back.'
+    ? 'A closing of one or two sentences under a short "##" heading (for example "## Choosing a value"), placed between the Quiz and the FAQ: a decision rule the reader can act on (for example "Use nstart = 25; raise it if tot.withinss still changes across seeds"), never a summary of the takeaways. It is the only section about choosing a value: don\'t also write a body section that gives the same rule. No headings for the Quiz or FAQ themselves (no "## Quiz", "## FAQ").'
     : 'A short closing section (1–3 sentences) with a meaningful heading that adds a decision rule or the next step, without restating the key takeaways. No call to action and no pointer to a course or path. It sits between the Quiz and the FAQ, so they are never back to back.';
   const primaryKeyword = classified.primaryKeyword || title;
+  // Educative tags: the author's keywords when given, otherwise the classifier's topic tags. Programming
+  // tags (the language plus the most specific topics) are what Educative's own Answers carry.
+  const answerTags = keywords.length ? keywords.slice(0, 5) : classified.tags;
+  const programmingTags = [...new Set([
+    ...(classified.language && classified.language !== 'none' ? [classified.language.toLowerCase().replace(/\s+/g, '-')] : []),
+    ...classified.tags,
+  ])].slice(0, 4);
   const imageCountStr = `${spec.images} image${spec.images === 1 ? '' : 's'}`;
   const languageStr = classified.language === 'none' ? 'none (use code only if it is essential)' : classified.language;
 
@@ -975,8 +1308,8 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     }),
   ]);
 
-  // 2b) FAQ check — author FAQs that drift from this Answer's exact question are dropped (and reported),
-  // spelling and names are fixed, and People-also-ask questions are ranked by relevance.
+  // 2b) FAQ check — People-also-ask questions are ranked by relevance to this Answer's exact question.
+  // Author FAQs are always kept, word for word. Wording is never changed.
   const paaQuestions = researchList(research, 'People also ask').filter((q) => /\?\s*$/.test(q) || q.split(/\s+/).length >= 4);
   const faqCheck = await stage('faq-check', async () => {
     const result = {
@@ -994,26 +1327,14 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     let parsed: any = null;
     try { parsed = parseJsonLoose(await openaiJSON(prompt)); } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
     if (parsed) {
-      // A correction may fix spelling and names, never reword: most words must stay the same.
-      const safeFix = (from: string, to: string) => {
-        const a = new Set(normWords(from).split(' ')), b = normWords(to).split(' ');
-        const same = b.filter((w) => a.has(w)).length;
-        return to && same / Math.max(a.size, b.length) >= 0.6 ? to.trim() : from;
-      };
-      const author: any[] = Array.isArray(parsed.author) ? parsed.author : [];
-      result.kept = [];
-      userFaqs.forEach((q, i) => {
-        const r = author.find((x) => Number(x?.n) === i + 1);
-        const fixed = r ? safeFix(q, String(r.question || '')) : q;
-        if (r && r.onTopic === false) { result.dropped.push({ question: q, reason: String(r.reason || 'off topic') }); return; }
-        if (fixed !== q) result.corrected.push({ from: q, to: fixed });
-        result.kept.push(fixed);
-      });
+      // Every author FAQ is kept, word for word, whatever its topic: the author asked for it. Only the
+      // People-also-ask candidates are filtered and ranked (and never repeat an author FAQ).
+      result.kept = userFaqs;
       const cands: any[] = Array.isArray(parsed.candidates) ? parsed.candidates : [];
       result.candidates = cands
         .filter((c) => Number(c?.relevance) >= 4 && paaQuestions[Number(c?.n) - 1])
         .sort((a, b) => Number(b.relevance) - Number(a.relevance))
-        .map((c) => safeFix(paaQuestions[Number(c.n) - 1], String(c.question || '')))
+        .map((c) => paaQuestions[Number(c.n) - 1])
         .slice(0, 10);
     }
     stageLog('faq-check', prompt, { userFaqs, paaQuestions }, result);
@@ -1091,7 +1412,7 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       research, verifiedLinks: verifiedLinksStr, imageCount: imageCountStr,
       primaryKeyword,
       faqCandidates: faqCheck.candidates.length ? faqCheck.candidates.map((q, i) => `${i + 1}. ${q}`).join('\n') : '(none)',
-      faqTarget: narrow ? 'Aim for 5–8 FAQs in total.' : 'Aim for 8–12 FAQs in total (fewer if the topic genuinely has fewer distinct questions).',
+      faqTarget: `Every author FAQ is included no matter how many there are or how broad they are. Then add candidates until there are about ${narrow ? '5–8' : '8–12'} FAQs in total (add none when the author FAQs already reach that).`,
     };
     const prompt = edpressoOutlinePrompt(args);
     const raw = await openaiJSON(prompt);
@@ -1127,10 +1448,11 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     return result;
   });
 
+  const searchPhrases = [primaryKeyword, ...keywords, ...researchList(research, 'Related keywords')];
   // Applied after the writer and the reviewer: no line-number comments in code, no unconfirmed quotes,
   // and no Terminal widget on a topic that is not done on the command line.
   const cleanDraft = (md: string) => {
-    let out = stripLineMarkers(md);
+    let out = moveLineExplanations(unifySubscripts(normalizeKeywordSyntax(cleanPlaceholders(removeListBeforeSlides(splitLatexWidgets(fixInlineLatex(stripLineMarkers(md)))), searchPhrases))));
     const q = enforceVerifiedQuotes(out, quoteCheck.verifiedQuotes, quoteCheck.fallback);
     out = q.markdown;
     const t = classified.commandLine ? { markdown: out, removed: 0 } : removeTerminalWidgets(out);
@@ -1189,7 +1511,7 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     const tail = blocks.join('\n\n');
     let checkedBlocks = blocks;
     if (tail) {
-      const prompt = edpressoWidgetReviewPrompt({ title, language: languageStr, keywords: keywordsStr, verifiedLinks: verifiedLinksStr, widgets: tail });
+      const prompt = edpressoWidgetReviewPrompt({ title, language: languageStr, keywords: keywordsStr, verifiedLinks: verifiedLinksStr, answerFacts: answerFacts(d), widgets: tail });
       const out = normalizeImageTags(sanitizeText(await generateText(prompt, { maxTokens: 8000 }))).trim();
       const sameFaqs = faqQuestions(out).map(normQuestion).join('|') === faqQuestions(tail).map(normQuestion).join('|');
       const sameQuiz = (out.match(/^\s*Q\d+\./gm) || []).length === (tail.match(/^\s*Q\d+\./gm) || []).length;
@@ -1223,6 +1545,8 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     // (A) Per program: verdict, fix, re-run.
     let { body, blocks } = protectWidgets(draft);
     const tags = codeTags(body);
+    // Outputs of the programs as written, so each program can be compared with the earlier ones.
+    const earlierOutputs: string[] = (await mapLimit(tags, 3, (t) => run(t.language, t.code))).map((r) => (r.ok ? r.stdout.trim() : ''));
     const programs = await mapLimit(tags.map((t, i) => ({ t, i })), 2, async ({ t, i }) => {
       // The program's context: from its section heading to the next program or heading after it.
       const sectionStart = Math.max(0, body.lastIndexOf('\n#', t.start));
@@ -1235,13 +1559,24 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       let result = await run(t.language, code);
       const attempts: any[] = [];
       if (!result.ran) return { index: i, code, result, attempts, changed: false };
+      const others = tags.filter((_o, j) => j !== i)
+        .map((o) => `- ${o.caption || '(no caption)'}\n${o.code.split('\n').slice(0, 14).join('\n')}`).join('\n\n') || '(none)';
       for (let attempt = 1; attempt <= 3; attempt++) {
         const prompt = edpressoCodeVerdictPrompt({
-          title, language: t.language, context, program: numberedListing(code), output: outputText(result),
+          title, language: t.language, context, others, program: numberedListing(code), output: outputText(result),
           attempt: attempt === 1 ? '' : `This is attempt ${attempt}: an earlier fix still did not show the effect.`,
         });
         let verdict: any = {};
         try { verdict = parseJsonLoose(await openaiJSON(prompt)); } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+        // Checks code can make on its own: the same output as an earlier program (a repeated experiment),
+        // or one line printed again and again (print each distinct warning once).
+        const lines = result.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+        const maxRepeat = Math.max(0, ...[...new Set(lines)].map((l) => lines.filter((x) => x === l).length));
+        const duplicateOf = earlierOutputs.findIndex((o, j) => j < i && o && o === result.stdout.trim());
+        const shadow = shadowedBuiltin(t.language, code);
+        if (shadow) verdict = { ...verdict, shows: false, problem: `${verdict?.problem || ''} The program assigns to \`${shadow}\`, which overwrites a built-in function; rename the variable.`.trim() };
+        if (maxRepeat >= 3) verdict = { ...verdict, shows: false, problem: `${verdict?.problem || ''} The output prints the same line ${maxRepeat} times; collect the messages and print each distinct one once.`.trim() };
+        if (duplicateOf >= 0) verdict = { ...verdict, shows: false, problem: `${verdict?.problem || ''} It prints exactly what program ${duplicateOf + 1} prints, so it repeats that experiment; show something different that the text around it describes.`.trim() };
         const shows = verdict?.shows === true && result.ok;
         attempts.push({ attempt, shows, purpose: verdict?.purpose, problem: verdict?.problem, stdout: result.stdout.slice(0, 500) });
         stageLog(`code-verdict#${i + 1}.${attempt}`, prompt, { program: i + 1 }, verdict);
@@ -1272,19 +1607,39 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       body = `${body.slice(0, t.start)}${tag}${body.slice(t.end)}`;
     }
 
+    // A program that never showed its point (or still fails) is removed with its line explanation; the
+    // text step then removes the sentences that introduced it. The first program (basic usage) always stays.
+    const dropped: { program: number; caption: string; problem: string }[] = [];
+    const failedIdx = programs.filter((p) => p.index > 0 && p.result.ran && p.attempts.length && !p.attempts.some((a: any) => a.shows)).map((p) => p.index);
+    if (failedIdx.length) {
+      const current = codeTags(body);
+      for (const i of [...failedIdx].sort((a, b) => b - a)) {
+        const t = current[i];
+        if (!t) continue;
+        let end = t.end;
+        const after = body.slice(end);
+        const expl = after.match(/^\s*((?:[ \t]*\*\*Lines?\s+\d+[^\n]*(?:\n|$))+)/);
+        if (expl) end += expl[0].length;
+        dropped.push({ program: i + 1, caption: t.caption, problem: String(programs[i].attempts.slice(-1)[0]?.problem || '') });
+        body = `${body.slice(0, t.start).replace(/\s+$/, '')}\n\n${body.slice(end).replace(/^\s+/, '')}`;
+      }
+      for (const i of failedIdx) programs[i] = { ...programs[i], dropped: true } as any;
+    }
+    const kept = programs.filter((p: any) => !p.dropped);
+
     // (B) Text: agree with the real output; fix line references and names. The code is final here.
     const refs = lineRefProblems(body);
     const report = codeTags(body).map((t, i) => {
-      const p = programs[i];
+      const p = kept[i];
       return `## Program ${i + 1} (${t.language})${t.caption ? `: ${t.caption}` : ''}${p.changed ? ' — rewritten so its output shows the effect; update the text that describes it' : ''}\n\`\`\`\n${numberedListing(t.code)}\n\`\`\`\n${outputText(p.result)}\nLine-reference problems: ${refs[i].join('; ') || 'none found'}`;
-    }).join('\n\n');
-    const needsText = programs.some((p) => p.changed || (p.result.ran && !p.result.ok)) || refs.some((r) => r.length) || programs.some((p) => p.result.ran);
+    }).join('\n\n') + (dropped.length ? `\n\n## Programs removed (they never showed their point)\n${dropped.map((x) => `- "${x.caption}": ${x.problem}`).join('\n')}\nDelete or rewrite the sentences that introduced, explained, or quoted the output of these programs; don't mention them.` : '');
+    const needsText = dropped.length > 0 || programs.some((p) => p.changed || (p.result.ran && !p.result.ok)) || refs.some((r) => r.length) || programs.some((p) => p.result.ran);
     let textAccepted = false;
     if (needsText) {
       const prompt = edpressoCodeCheckPrompt({
         title, language: languageStr, wordBudget: spec.budget, currentWordCount: String(countBodyWords(body)), report, draft: body,
       });
-      const out = stripLineMarkers(normalizeImageTags(sanitizeText(await generateText(prompt, { maxTokens: 16000 }))).trim());
+      const out = moveLineExplanations(stripLineMarkers(normalizeImageTags(sanitizeText(await generateText(prompt, { maxTokens: 16000 }))).trim()));
       const sameCode = codeTags(out).map((t) => t.code.trim()).join('\n#--#\n') === codeTags(body).map((t) => t.code.trim()).join('\n#--#\n');
       const tokensKept = blocks.every((_b, i) => out.includes(`EDPWIDGET${i}TOKEN`));
       textAccepted = isSafeRewrite(body, out) && sameCode && tokensKept;
@@ -1293,14 +1648,47 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     }
     draft = restoreWidgets(body, blocks);
     const final = codeTags(draft).map((t, i) => ({
-      program: i + 1, language: t.language, caption: t.caption, changed: programs[i]?.changed || false,
-      ran: programs[i]?.result.ran, ok: programs[i]?.result.ok, reason: programs[i]?.result.reason,
-      shows: programs[i]?.attempts.some((a: any) => a.shows) ?? null,
-      stdout: (programs[i]?.result.stdout || '').slice(0, 1500), stderr: (programs[i]?.result.stderr || '').slice(0, 600),
+      program: i + 1, language: t.language, caption: t.caption, changed: kept[i]?.changed || false,
+      ran: kept[i]?.result.ran, ok: kept[i]?.result.ok, reason: kept[i]?.result.reason,
+      shows: kept[i]?.attempts.some((a: any) => a.shows) ?? null,
+      stdout: (kept[i]?.result.stdout || '').slice(0, 1500), stderr: (kept[i]?.result.stderr || '').slice(0, 600),
     }));
-    const payload = { programs: programs.map((p) => ({ program: p.index + 1, changed: p.changed, attempts: p.attempts })), textAccepted, final, lineRefProblems: lineRefProblems(draft) };
+    const payload = { programs: programs.map((p) => ({ program: p.index + 1, changed: p.changed, attempts: p.attempts, dropped: !!(p as any).dropped })), dropped, textAccepted, final, lineRefProblems: lineRefProblems(draft) };
     emit({ type: 'data', name: 'code-check', payload });
     return payload;
+  });
+
+  // 6b2) Coverage — every fact the outline marked mustCover (defaults, ignored-argument cases, the most
+  // searched warning) is stated in the body, not only in the Quiz or FAQ. Code is never changed here.
+  const coverage = await stage('coverage', async () => {
+    const must: string[] = (Array.isArray(outline?.mustCover) ? outline.mustCover : []).map((x: any) => String(x).trim()).filter(Boolean).slice(0, 8);
+    if (!must.length) return { skipped: 'nothing planned', missing: [] as string[], added: false };
+    const { body, blocks } = protectWidgets(draft);
+    const checkPrompt = edpressoCoverageCheckPrompt({ title, items: must.map((m, i) => `${i + 1}. ${m}`).join('\n'), draft: body });
+    let missingIdx: number[] = [];
+    try {
+      const parsed: any = parseJsonLoose(await openaiJSON(checkPrompt));
+      missingIdx = (Array.isArray(parsed?.missing) ? parsed.missing : []).map(Number).filter((n: number) => n >= 1 && n <= must.length);
+    } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+    const missing = [...new Set(missingIdx)].map((n) => must[n - 1]);
+    stageLog('coverage-check', checkPrompt, { must }, { missing });
+    let added = false;
+    if (missing.length) {
+      const fixPrompt = edpressoCoverageFixPrompt({
+        title, missing: missing.map((m) => `- ${m}`).join('\n'), wordBudget: spec.budget, currentWordCount: String(countBodyWords(body)), draft: body,
+      });
+      const out = restoreCode(cleanDraft(normalizeImageTags(sanitizeText(await generateText(fixPrompt, { maxTokens: 16000 }))).trim()).markdown, body);
+      const sameCode = codeTags(out).map((t) => t.code.trim()).join('\n#--#\n') === codeTags(body).map((t) => t.code.trim()).join('\n#--#\n');
+      const tokensKept = blocks.every((_b, i) => out.includes(`EDPWIDGET${i}TOKEN`));
+      const count = (md: string, re: RegExp) => (md.match(re) || []).length;
+      const widgetsKept = count(out, /\[\[[A-Za-z ]+ widget\]\]/g) === count(body, /\[\[[A-Za-z ]+ widget\]\]/g) && count(out, /\[image\]/g) === count(body, /\[image\]/g);
+      added = isSafeRewrite(body, out) && sameCode && tokensKept && widgetsKept;
+      if (added) draft = restoreWidgets(out, blocks);
+      stageLog('coverage-fix', fixPrompt, { missing }, { added, sameCode, tokensKept, widgetsKept });
+    }
+    const result = { must, missing, added };
+    emit({ type: 'data', name: 'coverage', payload: result });
+    return result;
   });
 
   // 6c) Keyword cap — the exact primary keyword stays only in the first paragraph and one "##" heading
@@ -1325,6 +1713,27 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     return result;
   });
 
+  // 6a) Author FAQs — every FAQ the author gave is in the FAQ widget, word for word. Any the draft left out
+  // is added back (at the top, in the author's order) with an answer written for it.
+  await stage('author-faqs', async () => {
+    const present = new Set(faqQuestions(draft).map(normQuestion));
+    const missing = authorFaqs.filter((q) => !present.has(normQuestion(q)));
+    if (!missing.length) return { missing: [] as string[] };
+    const prompt = edpressoFaqAnswerPrompt({ title, language: languageStr, questions: missing.map((q, i) => `${i + 1}. ${q}`).join('\n') });
+    let answers: any[] = [];
+    try { answers = (parseJsonLoose(await openaiJSON(prompt)) as any)?.answers || []; } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+    const pairs = missing.map((q, i) => {
+      const a = String(answers.find((x: any) => Number(x?.n) === i + 1)?.answer || '').trim();
+      return `Q: ${q}\nA: ${a || 'See the sections above for details.'}`;
+    }).join('\n\n');
+    draft = /\[\[FAQ widget\]\]/.test(draft)
+      ? draft.replace(/\[\[FAQ widget\]\]\s*/, () => `[[FAQ widget]]\n${pairs}\n\n`)
+      : `${draft}\n\nHere are answers to common questions.\n\n[[FAQ widget]]\n${pairs}\n[[/FAQ widget]]`;
+    stageLog('author-faqs', prompt, { missing }, { answers });
+    emit({ type: 'data', name: 'author-faqs', payload: { missing } });
+    return { missing };
+  });
+
   // 7) Link guard — drop any link the writer or reviewer produced that was not verified.
   const removedLinks = await stage('link-guard', async () => {
     const { markdown, removed } = stripUnverifiedLinks(draft, allowedUrls);
@@ -1339,7 +1748,8 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     const { body, blocks } = protectWidgets(draft);
     const pointers = removeCoursePointers(body, courseLinks);
     const woven = courseLinks.length
-      ? await weaveCourseLinks(pointers.markdown, courseLinks, title)
+      // Short language names are matched case-sensitively ("R"), so pass them uppercased.
+      ? await weaveCourseLinks(pointers.markdown, courseLinks, title, classified.language.length <= 2 ? classified.language.toUpperCase() : classified.language)
       : { markdown: pointers.markdown, links: [] as CourseLinkStatus[], removedSentences: [] as string[], applied: [] as any[] };
     if ('prompt' in woven && woven.prompt) stageLog('course-links', woven.prompt, { links: courseLinks }, { picks: (woven as any).picks, applied: woven.applied });
     // Course links never belong in the Quiz or FAQ.
@@ -1348,6 +1758,212 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     const removedSentences = [...pointers.removed, ...woven.removedSentences];
     emit({ type: 'data', name: 'course-links', payload: { links: woven.links, removedSentences, applied: woven.applied } });
     return woven.links;
+  });
+
+  // 7a2) Docs check — statements (body, Quiz, FAQ) that contradict the official documentation are corrected.
+  const docCheck = await stage('doc-check', async () => {
+    // Only documentation about this topic: a page that shares words with the title or keyword.
+    const topic = new Set(contentWords(`${title} ${primaryKeyword}`));
+    const docs = verifiedLinks.filter((l) => l.kind === 'external')
+      .map((l) => ({ l, score: contentWords(`${l.title} ${l.topic} ${l.url.replace(/[-/_.]/g, ' ')}`).filter((w) => topic.has(w)).length }))
+      .filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2).map((x) => x.l);
+    if (!docs.length) return { skipped: 'no official documentation found', corrections: [] as any[] };
+    const texts = (await Promise.all(docs.map(async (l) => ({ url: l.url, text: (await fetchPageText(l.url)).replace(/\s+/g, ' ').trim() }))))
+      .filter((d) => d.text.length > 200);
+    if (!texts.length) return { skipped: 'documentation could not be read', corrections: [] as any[] };
+    const docsStr = texts.map((d) => `## ${d.url}\n${d.text.slice(0, 14000)}`).join('\n\n');
+    const prompt = edpressoDocCheckPrompt({ title, docs: docsStr, answer: draft });
+    let parsed: any = {};
+    try { parsed = parseJsonLoose(await openaiJSON(prompt)); } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+    const applied: any[] = [];
+    const skipped: any[] = [];
+    for (const c of (Array.isArray(parsed?.corrections) ? parsed.corrections : [])) {
+      const wrong = String(c?.wrong || '').trim();
+      const correct = String(c?.correct || '').trim();
+      const count = wrong ? draft.split(wrong).length - 1 : 0;
+      const inCode = codeTags(draft).some((t) => t.code.includes(wrong));
+      if (!wrong || !correct || count !== 1 || inCode || correct.length > wrong.length * 1.5 + 40) { skipped.push({ wrong, why: !count ? 'not found' : count > 1 ? 'ambiguous' : inCode ? 'inside code' : 'bad replacement' }); continue; }
+      draft = draft.replace(wrong, () => correct);
+      applied.push({ wrong, correct, reason: c?.reason });
+    }
+    const result = { docs: texts.map((d) => d.url), corrections: applied, skipped };
+    stageLog('doc-check', prompt, { docs: texts.map((d) => d.url) }, result);
+    emit({ type: 'data', name: 'doc-check', payload: result });
+    return result;
+  });
+
+  // 7b2) Body links — every Answer links its closest verified Educative Answer and the official docs. If the
+  // writer's links were lost along the way, the most relevant ones are placed on existing words.
+  const bodyLinkReport = await stage('body-links', async () => {
+    const { body, blocks } = protectWidgets(draft);
+    const present = [...body.matchAll(MD_LINK_RE)].filter((m) => !m[1]).map((m) => normalizeUrl(stripTracking(m[3])));
+    const courseSet = new Set(courseLinks.map(normalizeUrl));
+    const topicWords = new Set(contentWords(`${title} ${primaryKeyword}`));
+    const score = (l: VerifiedLink) => contentWords(`${l.title} ${l.topic} ${l.url.replace(/[-/]/g, ' ')}`).filter((w) => topicWords.has(w)).length;
+    const isPresent = (l: VerifiedLink) => present.includes(normalizeUrl(l.url)) || present.includes(normalizeUrl(l.finalUrl));
+    const internal = verifiedLinks.filter((l) => l.kind === 'internal' && !isCoursePage(l.url) && !courseSet.has(normalizeUrl(l.url)));
+    const external = verifiedLinks.filter((l) => l.kind === 'external');
+    const want: string[] = [];
+    if (!internal.some(isPresent)) {
+      const best = [...internal].sort((a, b) => score(b) - score(a))[0];
+      if (best && score(best) > 0) want.push(best.url);
+    }
+    if (!external.some(isPresent)) {
+      const docs = [...external].sort((a, b) => score(b) - score(a))[0];
+      if (docs && score(docs) > 0) want.push(docs.url);
+    }
+    if (!want.length) return { added: [] as any[], present: present.length };
+    const woven = await weaveCourseLinks(body, want, title, classified.language.length <= 2 ? classified.language.toUpperCase() : classified.language);
+    draft = restoreWidgets(woven.markdown, blocks);
+    const result = { wanted: want, links: woven.links, applied: woven.applied };
+    stageLog('body-links', woven.prompt || '', { want }, result);
+    emit({ type: 'data', name: 'body-links', payload: result });
+    return result;
+  });
+
+  // 7c) Related Answers — a Callout that points to the series or prerequisite Answers the author gave,
+  // placed where it fits (prerequisites near the top). Links are checked first; the author's sentence is
+  // kept word for word.
+  const relatedReport = await stage('related-answers', async () => {
+    const urls = [...new Set(toList(input.relatedAnswers, /\r?\n/).map(stripTracking)
+      .filter((u) => /^https?:\/\/(www\.)?(educative\.io|how\.dev)\/answers\//i.test(u)))].slice(0, MAX_RELATED_ANSWERS);
+    if (!urls.length) return { skipped: 'none given' };
+    const checked = await Promise.all(urls.map(async (u) => ({ url: u, ok: (await checkUrl(u)).ok, title: await courseInfo(u) })));
+    const live = checked.filter((c) => c.ok);
+    if (!live.length) return { skipped: 'no related Answer loads', checked };
+    const userSentence = String(input.relatedSentence || '').trim();
+    const { body, blocks } = protectWidgets(draft);
+    const lines = body.split('\n');
+    const kinds = classifyLines(lines);
+    const headings = lines.filter((l, i) => kinds[i] === 'heading' && /^##\s/.test(l)).map((l) => l.replace(/^#+\s*/, '').trim());
+    const prompt = edpressoRelatedCalloutPrompt({
+      title,
+      answers: live.map((c) => `- ${c.url} (${c.title.split(' — ')[0] || courseTopic(c.url)})`).join('\n'),
+      sentence: userSentence || '(none)',
+      sections: headings.map((h) => `- ${h}`).join('\n') || '(none)',
+    });
+    let parsed: any = {};
+    try { parsed = parseJsonLoose(await openaiJSON(prompt)); } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+    let sentence = String(parsed?.sentence || '').trim();
+    const linkUrls = [...sentence.matchAll(MD_LINK_RE)].filter((m) => !m[1]).map((m) => normalizeUrl(stripTracking(m[3])));
+    const everyOnce = live.every((c) => linkUrls.filter((u) => u === normalizeUrl(c.url)).length === 1) && linkUrls.length === live.length;
+    const sameWords = !userSentence || normWords(sentence.replace(MD_LINK_RE, '$2')) === normWords(userSentence);
+    if (!sentence || !everyOnce || !sameWords || EXPLICIT_CTA_RE.test(sentence.replace(MD_LINK_RE, '$2')) && !userSentence) {
+      // Fallback: the author's sentence (or a plain one) followed by the linked titles.
+      const linked = live.map((c) => `[${(c.title.split(' — ')[0] || courseTopic(c.url)).replace(/[[\]]/g, '')}](${c.url})`).join(' and ');
+      sentence = userSentence ? `${userSentence} Related: ${linked}.` : `This Answer builds on ${linked}.`;
+    }
+    const callout = `[[Callout widget]]\n${sentence}\n[[/Callout widget]]`;
+    const placement = String(parsed?.placement || 'start').trim();
+    let out = body;
+    const insertBeforeLine = (idx: number) => { lines.splice(idx, 0, callout, ''); out = lines.join('\n'); };
+    const headingIdx = lines.findIndex((l, i) => kinds[i] === 'heading' && normWords(l.replace(/^#+\s*/, '')) === normWords(placement));
+    if (placement === 'end') {
+      const quizToken = lines.findIndex((l) => /^\s*EDPWIDGET\d+TOKEN\s*$/.test(l));
+      insertBeforeLine(quizToken >= 0 ? quizToken : lines.length);
+    } else if (headingIdx >= 0) {
+      insertBeforeLine(headingIdx);
+    } else {
+      // "start": before the first "##" section (after the direct answer, hook, and key takeaways).
+      const first = lines.findIndex((l, i) => kinds[i] === 'heading');
+      insertBeforeLine(first >= 0 ? first : lines.length);
+    }
+    draft = restoreWidgets(out.replace(/\n{3,}/g, '\n\n'), blocks);
+    const result = { urls: live.map((c) => c.url), sentence, placement, userSentence: !!userSentence };
+    stageLog('related-answers', prompt, { urls }, result);
+    emit({ type: 'data', name: 'related-answers', payload: result });
+    return result;
+  });
+
+  // 7d) FAQ links — each FAQ answer may link one other Educative Answer that explains words it already
+  // has. Candidates come from research's verified links and Educative's own Answers search; every pick is
+  // checked (live page, anchor in the answer, anchor about the page's title). Questions are never touched.
+  const faqLinkReport = await stage('faq-links', async () => {
+    const faqMatch = draft.match(/\[\[FAQ widget\]\]([\s\S]*?)\[\[\/FAQ widget\]\]/);
+    if (!faqMatch) return { skipped: 'no FAQ' };
+    const pairs = faqMatch[1].split(/\n(?=\s*Q:)/).map((p) => p.trim()).filter((p) => /^Q:/.test(p))
+      .map((p) => {
+        const q = p.match(/^Q:\s*(.*)$/m)?.[1]?.trim() || '';
+        const a = (p.split(/\n\s*A:\s*/)[1] || '').trim();
+        return { raw: p, q, a };
+      });
+    if (!pairs.length) return { skipped: 'no FAQ pairs' };
+
+    // Pages never linked: this Answer itself (and the live Answer it replaces).
+    const exclude = new Set<string>();
+    const replaceTarget = parseAnswerId(input.existingAnswerUrl);
+    if (replaceTarget && isEducativeConfigured()) {
+      try { const ex = await getAnswer(replaceTarget); if (ex.url) exclude.add(normalizeUrl(`https://www.educative.io/answers/${ex.url}`)); } catch {}
+    }
+    const ownTitle = normWords(title);
+
+    // Candidates: verified internal Answers from research, plus Educative's search for each FAQ's terms.
+    const termsPrompt = edpressoFaqSearchTermsPrompt({ title, faqs: pairs.map((p, i) => `${i + 1}. Q: ${p.q}\n   A: ${p.a}`).join('\n') });
+    let terms: any[] = [];
+    try { terms = (parseJsonLoose(await openaiJSON(termsPrompt, OPENAI_LIGHT)) as any)?.terms || []; } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+    const queries = [...new Set(terms.flatMap((t: any) => (Array.isArray(t?.queries) ? t.queries : [])).map((q: any) => String(q).trim()).filter(Boolean))].slice(0, 16);
+    const found = (await Promise.all(queries.map((q) => searchAnswers(q)))).flat();
+    const candMap = new Map<string, { title: string; url: string }>();
+    for (const l of verifiedLinks) {
+      if (l.kind === 'internal' && /\/answers\//.test(l.url)) candMap.set(normalizeUrl(l.url), { title: l.title || courseTopic(l.url), url: stripTracking(l.url) });
+    }
+    for (const f of found) if (!candMap.has(normalizeUrl(f.url))) candMap.set(normalizeUrl(f.url), f);
+    const bodyLinked = new Set([...protectWidgets(draft).body.matchAll(MD_LINK_RE)].filter((m) => !m[1]).map((m) => normalizeUrl(stripTracking(m[3]))));
+    const candidates = [...candMap.values()]
+      .filter((c) => !exclude.has(normalizeUrl(c.url)) && normWords(c.title) !== ownTitle)
+      .slice(0, 25);
+    if (!candidates.length) return { skipped: 'no candidate Answers', queries };
+
+    const linkPrompt = edpressoFaqLinkPrompt({
+      title,
+      faqs: pairs.map((p, i) => `${i + 1}. ${p.a}`).join('\n'),
+      candidates: candidates.map((c, i) => `${i + 1}. ${c.title} — ${c.url}${bodyLinked.has(normalizeUrl(c.url)) ? '' : ' (not linked in the body yet)'}`).join('\n'),
+    });
+    let picks: any[] = [];
+    try { picks = (parseJsonLoose(await openaiJSON(linkPrompt)) as any)?.links || []; } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+
+    const usedCands = new Set<number>();
+    const linkedFaqs = new Set<number>();
+    const applied: any[] = [];
+    const rejected: any[] = [];
+    let block = faqMatch[1];
+    for (const pick of picks) {
+      const fi = Number(pick?.faq) - 1, ci = Number(pick?.candidate) - 1;
+      const anchor = String(pick?.anchor || '').trim();
+      const pair = pairs[fi], cand = candidates[ci];
+      const why = !pair || !cand ? 'unknown faq or candidate'
+        : linkedFaqs.has(fi) ? 'answer already has a link'
+        : usedCands.has(ci) ? 'candidate already used'
+        : !anchor || anchor.split(/\s+/).length > 5 || GENERIC_ANCHOR_RE.test(anchor) || /[`*\[\]]/.test(anchor) ? 'bad anchor'
+        : !relatesToCourse(anchor, cand.title) ? 'anchor not about the linked Answer'
+        : '';
+      if (why) { rejected.push({ ...pick, why }); continue; }
+      // The anchor must be in the answer, outside inline code and existing links.
+      const at = (() => {
+        let from = 0;
+        for (;;) {
+          const i = pair.a.indexOf(anchor, from);
+          if (i < 0) return -1;
+          const before = pair.a.slice(0, i);
+          const inLink = (before.match(/\[/g) || []).length > (before.match(/\]/g) || []).length;
+          if (!insideInlineCode(pair.a, i) && !inLink) return i;
+          from = i + anchor.length;
+        }
+      })();
+      if (at < 0) { rejected.push({ ...pick, why: 'anchor not found in the answer' }); continue; }
+      if (!(await checkUrl(cand.url)).ok) { rejected.push({ ...pick, why: 'page does not load' }); continue; }
+      const newA = `${pair.a.slice(0, at)}[${anchor}](${cand.url})${pair.a.slice(at + anchor.length)}`;
+      const newRaw = pair.raw.replace(pair.a, () => newA);
+      block = block.replace(pair.raw, () => newRaw);
+      pair.raw = newRaw; pair.a = newA;
+      usedCands.add(ci); linkedFaqs.add(fi);
+      applied.push({ faq: pair.q, anchor, url: cand.url, title: cand.title });
+    }
+    draft = draft.replace(faqMatch[0], () => `[[FAQ widget]]${block}[[/FAQ widget]]`);
+    const result = { queries, candidates: candidates.length, applied, rejected };
+    stageLog('faq-links', linkPrompt, { queries, candidates: candidates.map((c) => c.url) }, result);
+    emit({ type: 'data', name: 'faq-links', payload: result });
+    return result;
   });
 
   // 8) SEO meta ‖ image generation.
@@ -1397,6 +2013,45 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
         stageLog('image-plan', prompt, { required: spec.images, missing }, { added });
         emit({ type: 'data', name: 'image-plan', payload: { required: spec.images, missing, added } });
       }
+      // Image sync: an image that shows a program's result must agree with what the program really printed.
+      const finalRuns: any[] = (codeCheck as any)?.final || [];
+      const imageMatches = [...draft.matchAll(IMAGE_TAG_RE)];
+      const slideWidget = draft.match(SLIDES_WIDGET_RE.source ? new RegExp(SLIDES_WIDGET_RE.source) : /$^/);
+      const slideItems = slideWidget ? parseSlides(slideWidget[1]) : [];
+      if (finalRuns.some((r) => r.ran) && (imageMatches.length || slideItems.length)) {
+        const programs = finalRuns.map((r) => `Program ${r.program}: ${r.caption}\nOutput:\n${String(r.stdout || '').slice(0, 1200)}`).join('\n\n');
+        const images = imageMatches.map((m, k) => {
+          const { description, caption } = parseImageTag(m[1]);
+          const around = draft.slice(Math.max(0, m.index! - 600), m.index!).split('\n').filter((l) => !/^\s*\[/.test(l)).join('\n').slice(-500);
+          return `${k + 1}. Text before it: ${around.replace(/\s+/g, ' ')}\n   Description: ${description}\n   Caption: ${caption}`;
+        }).concat(slideItems.map((sl, j) => `${imageMatches.length + j + 1}. (Slide ${j + 1} of ${slideItems.length} in one slideshow; all slides must show the same data) Description: ${sl.text}\n   Caption: (none; return the same text as the description)`))
+          .join('\n\n');
+        const syncPrompt = edpressoImageSyncPrompt({ title, programs, images });
+        let fixes: any[] = [];
+        try {
+          const parsed: any = parseJsonLoose(await openaiJSON(syncPrompt));
+          fixes = Array.isArray(parsed?.images) ? parsed.images : [];
+        } catch (e: any) { if (getAbortSignal()?.aborted) throw e; }
+        let k = 0;
+        draft = draft.replace(IMAGE_TAG_RE, (m) => {
+          const fix = fixes.find((f) => Number(f?.n) === ++k);
+          const description = String(fix?.description || '').trim();
+          if (!description) return m;
+          const caption = String(fix?.caption || '').trim() || parseImageTag(m.slice(7, -8)).caption;
+          return `[image][Description]${description}[/Description][Caption]${caption}[/Caption][/image]`;
+        });
+        // Slide lines are fixed in place, keeping the "Slide N:" form (images are generated from them later).
+        if (slideWidget && slideItems.length) {
+          const fixedSlides = slideItems.map((sl, j) => {
+            const fix = fixes.find((f) => Number(f?.n) === imageMatches.length + j + 1);
+            const text = String(fix?.description || '').replace(/\s+/g, ' ').trim();
+            return text || sl.text;
+          });
+          const bodySlides = fixedSlides.map((t, j) => `Slide ${j + 1}: ${t}${slideItems[j].url ? ` [Url]${slideItems[j].url}[/Url]` : ''}`).join('\n');
+          draft = draft.replace(slideWidget[0], () => `[[Slides widget]]\n${bodySlides}\n[[/Slides widget]]`);
+        }
+        stageLog('image-sync', syncPrompt, { images: imageMatches.length, slides: slideItems.length }, { fixes });
+      }
       // Alt text: Educative uses the caption as the image's alt, so write the final caption into each tag.
       draft = draft.replace(IMAGE_TAG_RE, (m, inner) => {
         const { caption } = parseImageTag(inner);
@@ -1417,7 +2072,34 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
           return '';
         }
       }));
-      emit({ type: 'data', name: 'images', payload: urls });
+      // Slides: one image per "Slide N:" line, each prompt carrying the whole walkthrough so every slide
+      // keeps the same layout, colors, and labels and only the step's change differs.
+      const slideReport: any[] = [];
+      let slideOrder = imageTags.length;
+      const widgets = [...draft.matchAll(SLIDES_WIDGET_RE)];
+      for (const w of widgets) {
+        const slides = parseSlides(w[1]);
+        if (!slides.length) continue;
+        const walkthrough = slides.map((sl, k) => `${k + 1}. ${sl.text}`).join(' ');
+        const slideUrls = await Promise.all(slides.map(async (sl, k) => {
+          if (sl.url) return sl.url;
+          const order = ++slideOrder;
+          const description = `Slide ${k + 1} of ${slides.length} in one step-by-step walkthrough. All slides share the same layout, colors, positions, labels, and data; only what this step changes is different, and it is highlighted. The whole walkthrough: ${walkthrough} THIS SLIDE (step ${k + 1}): ${sl.text} Show a small "Step ${k + 1} of ${slides.length}" label in a corner.`;
+          try {
+            const r = await generateGptImage(`[Description]${description}[/Description][Caption]${sl.text}[/Caption]`, order, imgSubfolder);
+            stageLog(`slide-generate#${order}`, '(gpt-image-2)', { step: k + 1, text: sl.text }, { url: r.url });
+            return r.url;
+          } catch (e: any) {
+            if (getAbortSignal()?.aborted) throw e;
+            emit({ type: 'log', name: `slide-generate#${order}`, message: `Slide image failed: ${e?.message}` });
+            return '';
+          }
+        }));
+        slideReport.push({ slides: slides.length, generated: slideUrls.filter(Boolean).length });
+        const body = slides.map((sl, k) => `Slide ${k + 1}: ${sl.text}${slideUrls[k] ? ` [Url]${slideUrls[k]}[/Url]` : ''}`).join('\n');
+        draft = draft.replace(w[0], () => `[[Slides widget]]\n${body}\n[[/Slides widget]]`);
+      }
+      emit({ type: 'data', name: 'images', payload: { images: urls, slides: slideReport } });
       return urls;
     }),
   ]);
@@ -1436,13 +2118,13 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     const before = countBodyWords(draft);
     if (before <= spec.maxWords) return { before, after: before, accepted: false, skipped: 'within budget' };
     const passes: any[] = [];
-    for (let pass = 1; pass <= 2 && countBodyWords(draft) > spec.maxWords; pass++) {
+    for (let pass = 1; pass <= 3 && countBodyWords(draft) > spec.maxWords; pass++) {
     const { body, blocks } = protectWidgets(draft);
     const prompt = edpressoTrimPrompt({
       title, wordBudget: spec.budget, currentWordCount: String(countBodyWords(body)),
-      cut: String(countBodyWords(body) - spec.maxWords + 15), primaryKeyword, draft: body,
+      cut: String(countBodyWords(body) - Math.round(spec.maxWords * 0.95)), primaryKeyword, draft: body,
     });
-    const out = cleanDraft(normalizeImageTags(sanitizeText(await generateText(prompt, { maxTokens: 16000 }))).trim()).markdown;
+    const out = restoreCode(cleanDraft(normalizeImageTags(sanitizeText(await generateText(prompt, { maxTokens: 16000 }))).trim()).markdown, body);
     const sameCode = codeTags(out).map((t) => t.code.trim()).join('\n#--#\n') === codeTags(body).map((t) => t.code.trim()).join('\n#--#\n');
     const tokensKept = blocks.every((_b, i) => out.includes(`EDPWIDGET${i}TOKEN`));
     const count = (md: string, re: RegExp) => (md.match(re) || []).length;
@@ -1460,6 +2142,8 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
     emit({ type: 'data', name: 'word-trim', payload: result });
     return result;
   });
+
+  draft = dedupeFaqs(dropWidgetHeadings(moveLineExplanations(draft)), authorFaqs);
 
   // 9) Assemble — write image URLs into their tags so the Markdown is self-contained.
   const final = await stage('assemble', async () => {
@@ -1492,7 +2176,10 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       scope: classified.scope,
       commandLine: classified.commandLine,
       quoteCheck: quoteCheck.checks,
+      tags: answerTags,
+      programmingTags,
       codeCheck,
+      coverage,
       keywordCap,
       competitorUrls,
       ...meta,
@@ -1500,6 +2187,10 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
       rejectedLinks,
       removedLinks,
       courseLinks: courseLinkReport,
+      relatedAnswers: relatedReport,
+      faqLinks: faqLinkReport,
+      bodyLinks: bodyLinkReport,
+      docCheck,
     };
     const result = {
       title,
@@ -1523,7 +2214,8 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
         const draftInfo = await pushAnswerDraft({
           title,
           markdown: final.markdown,
-          tags: keywords.slice(0, 5),
+          tags: answerTags,
+          programmingTags,
           slug: final.edpresso.slug,
           ...(replaceId ? { shotId: replaceId, replaceExisting: true } : {}),
         });
@@ -1541,4 +2233,64 @@ export async function runEdpressoPipeline(input: EdpressoInput, emit: Emit): Pro
 
   emit({ type: 'final', payload: final });
   return final;
+}
+
+// ---- Revamp check: should an existing Answer be revamped? Judged against the same guidelines the
+// generator follows (the reviewer's checklist and the structure for the Answer's type). ----
+
+export interface RevampAssessment {
+  verdict: 'revamp' | 'minor-fixes' | 'keep';
+  summary: string;
+  reasons: string[];
+  strengths: string[];
+  title: string;
+  answerType: string;
+  stats: Record<string, number | string>;
+}
+
+export async function assessExistingAnswer(shotId: string): Promise<RevampAssessment> {
+  const existing = await readAnswerForReview(shotId);
+  const title = existing.title || 'Untitled Answer';
+  // The Answer's type decides the ideal structure and word budget.
+  let parsed: any = {};
+  try { parsed = parseJsonLoose(await openaiJSON(edpressoClassifyPrompt({ title, keywords: title, requestedLanguage: '' }), OPENAI_LIGHT)); } catch {}
+  const type = (parsed.answerType in ANSWER_TYPES ? parsed.answerType : 'concept') as AnswerType;
+  // Same type, scope, and budget rules the generator applies.
+  const baseSpec = ANSWER_TYPES[type];
+  const narrow = parsed.scope === 'narrow' && type !== 'error';
+  const spec: AnswerTypeSpec = narrow
+    ? {
+        ...baseSpec,
+        maxWords: Math.min(baseSpec.maxWords, NARROW_MAX_WORDS),
+        budget: baseSpec.maxWords > NARROW_MAX_WORDS ? `300–${NARROW_MAX_WORDS} words (a narrow topic; never more than ${NARROW_MAX_WORDS})` : baseSpec.budget,
+        structure: `${baseSpec.structure}\n${NARROW_NOTE}`,
+      }
+    : baseSpec;
+  // The reviewer's checklist is the single source of the guidelines (including edits made on /prompts).
+  const reviewer = edpressoReviewerPrompt({
+    title, answerTypeLabel: spec.label, wordBudget: spec.budget, currentWordCount: String(existing.stats.bodyWords || ''),
+    typeStructure: spec.structure, keywords: title, verifiedLinks: '(any relevant Educative Answers and official documentation)',
+    primaryKeyword: String(parsed.primaryKeyword || title),
+    terminalRule: 'Only for topics done on the command line.',
+    closingRule: 'A short closing with a decision rule or next step, never a summary.',
+    draft: '',
+  });
+  const from = reviewer.indexOf('# Checklist');
+  const to = reviewer.indexOf('# Draft');
+  const guidelines = from >= 0 ? reviewer.slice(from + '# Checklist'.length, to > from ? to : undefined).trim() : reviewer;
+  const stats = Object.entries(existing.stats).map(([k, v]) => `${k}: ${v}`).join(', ');
+  const prompt = edpressoAssessPrompt({
+    title, answerTypeLabel: spec.label, wordBudget: spec.budget, typeStructure: spec.structure,
+    guidelines, stats, answer: existing.text.slice(0, 60000),
+  });
+  let out: any = {};
+  try { out = parseJsonLoose(await openaiJSON(prompt)); } catch (e: any) {
+    throw new Error(`The revamp check failed: ${e?.message || e}`);
+  }
+  const verdict = ['revamp', 'minor-fixes', 'keep'].includes(out?.verdict) ? out.verdict : 'revamp';
+  const list = (x: any) => (Array.isArray(x) ? x.map((r: any) => String(r).trim()).filter(Boolean).slice(0, 10) : []);
+  return {
+    verdict, summary: String(out?.summary || '').trim(), reasons: list(out?.reasons), strengths: list(out?.strengths),
+    title, answerType: `${spec.label}${narrow ? ' (narrow topic)' : ''}`, stats: existing.stats,
+  };
 }

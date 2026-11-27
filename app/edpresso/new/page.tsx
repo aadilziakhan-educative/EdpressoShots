@@ -18,6 +18,9 @@ const LANGUAGES = ['Python', 'Java', 'JavaScript', 'TypeScript', 'C++', 'C#', 'C
 const MAX_COMPETITOR_URLS = 3;
 // Mirrors MAX_COURSE_LINKS in lib/edpressoPipeline.ts.
 const MAX_COURSE_LINKS = 2;
+// Mirrors MAX_RELATED_ANSWERS in lib/edpressoPipeline.ts.
+const MAX_RELATED_ANSWERS = 2;
+const RELATED_ANSWER_RE = /^https?:\/\/(www\.)?(educative\.io|how\.dev)\/answers\/\S+$/i;
 
 // Mirrors parseAnswerId in lib/educative.ts.
 const ANSWER_EDITOR_LINK_RE = /^(https?:\/\/(www\.)?educative\.io\/(editor\/)?answereditor\/\d{6,}\/?|\d{6,})$/i;
@@ -42,21 +45,60 @@ export default function NewEdpressoPage() {
   const [language, setLanguage] = useState('');
   const [answerType, setAnswerType] = useState('auto');
   const [competitorUrls, setCompetitorUrls] = useState('');
-  const [courseLinks, setCourseLinks] = useState<string[]>(Array(MAX_COURSE_LINKS).fill(''));
+  const [courseLinks, setCourseLinks] = useState('');
+  const [relatedAnswers, setRelatedAnswers] = useState('');
+  const [relatedSentence, setRelatedSentence] = useState('');
   const [existingAnswerUrl, setExistingAnswerUrl] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [assessment, setAssessment] = useState<any>(null);
+  const [assessErr, setAssessErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
   const competitorList = competitorUrls.split('\n').map((u) => u.trim()).filter(Boolean);
   const badCompetitor = competitorList.find((u) => !/^https?:\/\/\S+$/i.test(u));
-  const courseList = courseLinks.map((u) => u.trim()).filter(Boolean);
+  const courseList = courseLinks.split('\n').map((u) => u.trim()).filter(Boolean);
   const badCourse = courseList.find((u) => !/^https?:\/\/(www\.)?educative\.io\/\S+$/i.test(u));
+  const relatedList = relatedAnswers.split('\n').map((u) => u.trim()).filter(Boolean);
+  const badRelated = relatedList.find((u) => !RELATED_ANSWER_RE.test(u));
+
+  // Ask the app's judge whether the linked Answer needs a revamp (shown in a popup).
+  async function checkRevamp() {
+    const link = existingAnswerUrl.trim();
+    if (!ANSWER_EDITOR_LINK_RE.test(link)) {
+      setAssessErr('Paste the Answer\'s editor link first, for example https://www.educative.io/editor/answereditor/6241014612361216');
+      setAssessment({ pending: false });
+      return;
+    }
+    setChecking(true);
+    setAssessErr('');
+    setAssessment({ pending: true });
+    try {
+      const res = await fetch('/api/edpresso/assess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ existingAnswerUrl: link }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || json.error) { setAssessErr(json?.error || 'The check failed'); setAssessment({ pending: false }); }
+      else setAssessment(json);
+    } catch (e: any) {
+      setAssessErr(e?.message || String(e));
+      setAssessment({ pending: false });
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (competitorList.length > MAX_COMPETITOR_URLS) { setErr(`Add at most ${MAX_COMPETITOR_URLS} competitor URLs.`); return; }
     if (badCompetitor) { setErr(`Competitor URL must start with http:// or https:// — "${badCompetitor}"`); return; }
+    if (courseList.length > MAX_COURSE_LINKS) { setErr(`Add at most ${MAX_COURSE_LINKS} course links.`); return; }
     if (badCourse) { setErr(`Course link must be an educative.io URL — "${badCourse}"`); return; }
+    if (relatedList.length > MAX_RELATED_ANSWERS) { setErr(`Add at most ${MAX_RELATED_ANSWERS} related Answer links.`); return; }
+    if (badRelated) { setErr(`Related Answer must be a published Answer link such as https://www.educative.io/answers/… — "${badRelated}"`); return; }
+    if (relatedSentence.trim() && !relatedList.length) { setErr('Add the related Answer link(s) the sentence refers to.'); return; }
     const existing = existingAnswerUrl.trim();
     if (existing && !ANSWER_EDITOR_LINK_RE.test(existing)) {
       setErr(`Existing Answer must be an editor link like https://www.educative.io/editor/answereditor/6241014612361216 — "${existing}"`);
@@ -76,6 +118,8 @@ export default function NewEdpressoPage() {
           answerType,
           competitorUrls: competitorList.join('\n'),
           courseLinks: courseList.join('\n'),
+          relatedAnswers: relatedList.join('\n'),
+          relatedSentence: relatedSentence.trim(),
           existingAnswerUrl: existing,
         }),
       });
@@ -197,30 +241,53 @@ export default function NewEdpressoPage() {
           label={`Course links (optional, up to ${MAX_COURSE_LINKS})`}
           hint="Educative course URLs. Each is linked once from a fact, keyword, or example in the Answer, never with wording like “this course” or “to learn more”."
         >
-          <div className="grid gap-2">
-            {courseLinks.map((link, i) => (
-              <input
-                key={i}
-                className="input font-mono text-xs"
-                type="url"
-                placeholder="https://www.educative.io/courses/…"
-                value={link}
-                onChange={(e) => setCourseLinks((list) => list.map((l, j) => (j === i ? e.target.value : l)))}
-              />
-            ))}
-          </div>
+          <textarea
+            className="input min-h-[70px] font-mono text-xs"
+            placeholder={'https://www.educative.io/courses/…\nhttps://www.educative.io/path/…'}
+            value={courseLinks}
+            onChange={(e) => setCourseLinks(e.target.value)}
+          />
+        </Field>
+
+        <Field
+          label={`Series or prerequisite Answers (optional, up to ${MAX_RELATED_ANSWERS})`}
+          hint="One published Answer link per line. Use when this Answer is part of a series or needs another Answer read first. They are shown in a Callout at a fitting place in the Answer."
+        >
+          <textarea
+            className="input min-h-[70px] font-mono text-xs"
+            placeholder={'https://www.educative.io/answers/what-is-the-k-means-algorithm'}
+            value={relatedAnswers}
+            onChange={(e) => setRelatedAnswers(e.target.value)}
+          />
+          <input
+            className="input mt-2 text-sm"
+            placeholder="Optional sentence for the Callout, e.g. This Answer builds on how the k-means algorithm assigns points to clusters."
+            value={relatedSentence}
+            onChange={(e) => setRelatedSentence(e.target.value)}
+          />
         </Field>
 
         <Field
           label="Replace an existing Answer (optional)"
           hint="Paste the Answer's editor link to overwrite its content, title, and tags with this Shot instead of creating a new Answer. Its published URL is kept; the change goes live when a reviewer publishes it."
         >
-          <input
-            className="input font-mono text-xs"
-            placeholder="https://www.educative.io/editor/answereditor/6241014612361216"
-            value={existingAnswerUrl}
-            onChange={(e) => setExistingAnswerUrl(e.target.value)}
-          />
+          <div className="flex gap-2">
+            <input
+              className="input font-mono text-xs flex-1"
+              placeholder="https://www.educative.io/editor/answereditor/6241014612361216"
+              value={existingAnswerUrl}
+              onChange={(e) => setExistingAnswerUrl(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn-secondary whitespace-nowrap text-xs"
+              disabled={checking || !existingAnswerUrl.trim()}
+              onClick={checkRevamp}
+              title="Judge the existing Answer against our guidelines and say whether a revamp is worth it"
+            >
+              {checking ? 'Checking…' : 'Does it need a revamp?'}
+            </button>
+          </div>
         </Field>
 
         <div className="flex items-center gap-3 pt-1">
@@ -245,6 +312,53 @@ export default function NewEdpressoPage() {
 
       {err && (
         <div className="rounded-xl border border-red-500/40 bg-red-500/10 text-red-300 p-4 text-sm">{err}</div>
+      )}
+
+      {assessment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => !checking && setAssessment(null)}>
+          <div className="card w-full max-w-xl max-h-[85vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-lg font-semibold">Revamp check</h2>
+              <button type="button" className="text-[var(--text-dim)] hover:text-white" onClick={() => setAssessment(null)} disabled={checking} aria-label="Close">✕</button>
+            </div>
+            {assessment.pending ? (
+              <p className="text-sm text-[var(--text-dim)] flex items-center gap-2">
+                <span className="h-3.5 w-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                Reading the Answer and judging it against our guidelines…
+              </p>
+            ) : assessErr ? (
+              <p className="text-sm text-red-300 break-words">{assessErr}</p>
+            ) : (
+              <>
+                <div className="space-y-1">
+                  <span className={`pill ${assessment.verdict === 'revamp' ? 'pill-error' : assessment.verdict === 'keep' ? 'pill-success' : ''}`}>
+                    {assessment.verdict === 'revamp' ? 'Revamp recommended' : assessment.verdict === 'keep' ? 'No revamp needed' : 'Minor fixes only'}
+                  </span>
+                  <p className="text-sm font-medium break-words">{assessment.title}</p>
+                  <p className="text-xs text-[var(--text-faint)]">{assessment.answerType}</p>
+                </div>
+                {assessment.summary && <p className="text-sm">{assessment.summary}</p>}
+                {assessment.reasons?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--text-dim)] mb-1">
+                      {assessment.verdict === 'keep' ? 'Small things to note' : 'Why'}
+                    </p>
+                    <ul className="list-disc ml-5 space-y-1 text-sm">{assessment.reasons.map((r: string) => <li key={r}>{r}</li>)}</ul>
+                  </div>
+                )}
+                {assessment.strengths?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--text-dim)] mb-1">Already good</p>
+                    <ul className="list-disc ml-5 space-y-1 text-sm">{assessment.strengths.map((r: string) => <li key={r}>{r}</li>)}</ul>
+                  </div>
+                )}
+                <p className="text-xs text-[var(--text-faint)]">
+                  {Object.entries(assessment.stats || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                </p>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
